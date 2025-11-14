@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+test_results_*.xlsx
+test_questions_sample.xlsx
+
+# Logs
+*.log
+logs/
+
+# OS
+Thumbs.db
+
+# Project specific
+*.pyc
+.mypy_cache/
+.ruff_cache/
+
+# Frontend (Node.js / React)
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+frontend/.cache/
+frontend/package-lock.json
+frontend/yarn.lock
+frontend/pnpm-lock.yaml
+
+# Frontend - Production
+frontend/.env.production
+frontend/.env.local
+frontend/.env.*.local
+
+# Frontend - Logs
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+frontend/lerna-debug.log*
+
+# Frontend - Testing
+frontend/coverage/
+frontend/.nyc_output/
+
+# Frontend - OS
+frontend/.DS_Store
+frontend/Thumbs.db

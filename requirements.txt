@@ -1,0 +1,38 @@
+# Core Dependencies
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+
+# LLM & Agent
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-google-genai>=2.0.0
+langchain-ollama>=0.1.0
+langchain-community>=0.3.0
+langgraph>=0.3.0
+
+# API Framework
+fastapi>=0.115.0
+uvicorn>=0.32.0
+
+# Stock Data
+vnstock>=3.3.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Technical Analysis
+ta>=0.11.0
+
+# HTTP Client
+httpx>=0.27.0
+aiohttp>=3.10.0
+requests>=2.31.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+
+# Excel support for automated tests
+openpyxl>=3.1.0
+
+# Utilities
+python-dateutil>=2.8.0
