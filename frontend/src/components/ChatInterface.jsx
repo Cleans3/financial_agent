@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Loader2, User, Bot } from "lucide-react";
+import { Send, Loader2, User, Bot, Plus, X, File, Image, FileText, FileSpreadsheet, FileArchive } from "lucide-react";
 import axios from "axios";
 import MessageBubble from "./MessageBubble";
 
@@ -13,7 +13,12 @@ const ChatInterface = () => {
   ]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [uploadedFiles, setUploadedFiles] = useState([]);
+  const [fileContext, setFileContext] = useState(null); // Lưu context file để chat tiếp
+  const [isDragOver, setIsDragOver] = useState(false); // Drag-over state
   const messagesEndRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const textareaRef = useRef(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -25,28 +30,85 @@ const ChatInterface = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!input.trim() || isLoading) return;
+    if (!input.trim() && uploadedFiles.length === 0 || isLoading) return;
 
     const userMessage = input.trim();
     setInput("");
+    const filesToProcess = [...uploadedFiles];
+    setUploadedFiles([]);
 
     // Add user message
-    setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
+    setMessages((prev) => [...prev, { role: "user", content: userMessage || "Phân tích file" }]);
     setIsLoading(true);
 
     try {
-      const response = await axios.post("/api/chat", {
-        question: userMessage,
-      });
+      // If files are uploaded, process them
+      if (filesToProcess.length > 0) {
+        for (const file of filesToProcess) {
+          try {
+            // Convert data URL to blob
+            const response = await fetch(file.data);
+            const blob = await response.blob();
 
-      // Add assistant response
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: response.data.answer,
-        },
-      ]);
+            // Create FormData
+            const formData = new FormData();
+            formData.append("file", blob, file.name);
+            if (userMessage) {
+              formData.append("question", userMessage);
+            }
+
+            // Upload and analyze
+            const analysisResponse = await axios.post("/api/upload", formData, {
+              headers: {
+                "Content-Type": "multipart/form-data",
+              },
+            });
+
+            // Display analysis result
+            const analysisMessage = analysisResponse.data.analysis || analysisResponse.data.message;
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                content: `📄 **${file.name}**\n\n${analysisMessage}`,
+              },
+            ]);
+            
+            // Lưu file context để dùng cho câu hỏi tiếp theo
+            setFileContext({
+              fileName: file.name,
+              analysis: analysisMessage
+            });
+          } catch (error) {
+            console.error("Error analyzing file:", error);
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                content: `❌ Lỗi phân tích file "${file.name}": ${
+                  error.response?.data?.detail || error.message
+                }`,
+              },
+            ]);
+          }
+        }
+      } 
+      // Nếu CHỈ có text message (không upload file), gửi qua chat API
+      // Hoặc nếu user có file context từ lần upload trước, gửi với context đó
+      else if (userMessage) {
+        const response = await axios.post("/api/chat", {
+          question: userMessage,
+        });
+
+        // Add assistant response
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: response.data.answer,
+          },
+        ]);
+      }
     } catch (error) {
       console.error("Error:", error);
       setMessages((prev) => [
@@ -70,8 +132,171 @@ const ChatInterface = () => {
     }
   };
 
+  const handleFileSelect = (e) => {
+    const files = Array.from(e.target.files || []);
+    files.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        setUploadedFiles((prev) => [
+          ...prev,
+          {
+            id: Date.now() + Math.random(),
+            name: file.name,
+            size: file.size,
+            type: file.type,
+            data: event.target.result,
+          },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    });
+    // Reset input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const removeFile = (fileId) => {
+    setUploadedFiles((prev) => prev.filter((f) => f.id !== fileId));
+  };
+
+  const getFileIcon = (type) => {
+    if (type.startsWith("image/")) {
+      return (
+        <div className="text-emerald-400">
+          <Image className="w-6 h-6" />
+        </div>
+      );
+    }
+    if (type.includes("pdf")) {
+      return (
+        <div className="text-red-400">
+          <FileText className="w-6 h-6" />
+        </div>
+      );
+    }
+    if (type.includes("word") || type.includes("document")) {
+      return (
+        <div className="text-blue-400">
+          <FileText className="w-6 h-6" />
+        </div>
+      );
+    }
+    if (
+      type.includes("sheet") ||
+      type.includes("excel") ||
+      type.includes("spreadsheet")
+    ) {
+      return (
+        <div className="text-green-400">
+          <FileSpreadsheet className="w-6 h-6" />
+        </div>
+      );
+    }
+    if (type.includes("zip") || type.includes("rar") || type.includes("7z")) {
+      return (
+        <div className="text-yellow-400">
+          <FileArchive className="w-6 h-6" />
+        </div>
+      );
+    }
+    return (
+      <div className="text-slate-400">
+        <File className="w-6 h-6" />
+      </div>
+    );
+  };
+
+  const formatFileSize = (bytes) => {
+    if (bytes === 0) return "0 Bytes";
+    const k = 1024;
+    const sizes = ["Bytes", "KB", "MB"];
+    const i = Math.floor(Math.log(bytes, k));
+    return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + " " + sizes[i];
+  };
+
+  const truncateFileName = (name, maxLength = 20) => {
+    if (name.length <= maxLength) return name;
+    const ext = name.split(".").pop();
+    const nameWithoutExt = name.substring(0, name.lastIndexOf("."));
+    const truncated = nameWithoutExt.substring(0, maxLength - ext.length - 4);
+    return truncated + "..." + ext;
+  };
+
+  const handlePaste = (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].kind === "file") {
+        const file = items[i].getAsFile();
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            setUploadedFiles((prev) => [
+              ...prev,
+              {
+                id: Date.now() + Math.random(),
+                name: file.name,
+                size: file.size,
+                type: file.type,
+                data: event.target.result,
+              },
+            ]);
+          };
+          reader.readAsDataURL(file);
+        }
+      }
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+    
+    const files = e.dataTransfer?.files;
+    if (!files) return;
+
+    // Process dropped files
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        setUploadedFiles((prev) => [
+          ...prev,
+          {
+            id: Date.now() + Math.random() + i,
+            name: file.name,
+            size: file.size,
+            type: file.type,
+            data: event.target.result,
+          },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
+    <div 
+      className="flex-1 flex flex-col overflow-hidden"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
         <div className="max-w-4xl mx-auto space-y-6">
@@ -102,15 +327,109 @@ const ChatInterface = () => {
 
       {/* Input */}
       <div className="border-t border-slate-700 bg-slate-800/30 backdrop-blur-sm p-4">
-        <form onSubmit={handleSubmit} className="max-w-4xl mx-auto">
-          <div className="relative flex items-end gap-2">
-            <div className="flex-1 relative">
+        <form 
+          onSubmit={handleSubmit}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          className={`max-w-4xl mx-auto space-y-3 transition-all duration-200 rounded-lg p-3 ${
+            isDragOver 
+              ? "bg-slate-700/80 border-2 border-cyan-500/50" 
+              : "bg-transparent"
+          }`}
+        >
+          {/* File Preview Grid */}
+          {uploadedFiles.length > 0 && (
+            <div className="space-y-2 pointer-events-none">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-slate-300">
+                  Tệp đã chọn ({uploadedFiles.length})
+                </label>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 pointer-events-auto">
+              {uploadedFiles.map((file) => (
+                <div
+                  key={file.id}
+                  className="relative group bg-slate-700/50 rounded-lg p-2 border border-slate-600 hover:border-cyan-500/50 transition-all"
+                >
+                  {/* File Preview Thumbnail */}
+                  {file.type.startsWith("image/") ? (
+                    <div className="w-full h-20 rounded mb-2 overflow-hidden bg-slate-800">
+                      <img
+                        src={file.data}
+                        alt={file.name}
+                        className="w-full h-full object-cover"
+                      />
+                    </div>
+                  ) : (
+                    <div className="w-full h-20 rounded mb-2 bg-slate-800 flex items-center justify-center text-slate-400">
+                      {getFileIcon(file.type)}
+                    </div>
+                  )}
+
+                  {/* File Info */}
+                  <div className="space-y-1">
+                    <p
+                      title={file.name}
+                      className="text-xs text-slate-300 truncate font-medium"
+                    >
+                      {truncateFileName(file.name, 15)}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      {formatFileSize(file.size)}
+                    </p>
+                  </div>
+
+                  {/* Remove Button */}
+                  <button
+                    type="button"
+                    onClick={() => removeFile(file.id)}
+                    className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity
+                             bg-red-500/80 hover:bg-red-600 rounded-full p-1"
+                  >
+                    <X className="w-3 h-3 text-white" />
+                  </button>
+                </div>
+              ))}
+              </div>
+            </div>
+          )}
+
+          {/* Input Container - Flex with no wrap */}
+          <div className="flex items-stretch gap-3">
+            {/* File Upload Button - Circle */}
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="bg-slate-700 hover:bg-slate-600 text-white rounded-full
+                       transition-all duration-200 transform hover:scale-110 active:scale-95
+                       flex-shrink-0 flex items-center justify-center
+                       w-12 h-12 min-w-12 min-h-12"
+              title="Thêm file (hoặc Ctrl+V để paste)"
+            >
+              <Plus className="w-6 h-6" />
+            </button>
+
+            {/* Hidden File Input */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              onChange={handleFileSelect}
+              multiple
+              accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv"
+              className="hidden"
+            />
+
+            {/* Text Input */}
+            <div className="flex-1 relative flex items-stretch">
               <textarea
+                ref={textareaRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
                 placeholder="Hỏi về bất kỳ mã chứng khoán nào... (VD: Thông tin VNM, Giá VCB 3 tháng)"
-                className="w-full bg-slate-800 text-white placeholder-slate-500 
+                className="flex-1 bg-slate-800 text-white placeholder-slate-500 
                          rounded-2xl px-4 py-3 pr-12
                          border border-slate-600 focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20
                          outline-none resize-none transition-all
@@ -118,7 +437,7 @@ const ChatInterface = () => {
                 rows={1}
                 disabled={isLoading}
                 style={{
-                  minHeight: "52px",
+                  minHeight: "48px",
                   height: "auto",
                 }}
                 onInput={(e) => {
@@ -128,14 +447,16 @@ const ChatInterface = () => {
               />
             </div>
 
+            {/* Send Button - Circle */}
             <button
               type="submit"
-              disabled={!input.trim() || isLoading}
+              disabled={(!input.trim() && uploadedFiles.length === 0) || isLoading}
               className="bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-600 hover:to-cyan-600
-                       text-white rounded-2xl p-3
+                       text-white rounded-full
                        disabled:opacity-50 disabled:cursor-not-allowed
                        transition-all duration-200 transform hover:scale-105 active:scale-95
-                       shadow-lg hover:shadow-cyan-500/50"
+                       shadow-lg hover:shadow-cyan-500/50 flex-shrink-0 
+                       w-12 h-12 min-w-12 min-h-12 flex items-center justify-center"
             >
               {isLoading ? (
                 <Loader2 className="w-5 h-5 animate-spin" />
@@ -145,8 +466,8 @@ const ChatInterface = () => {
             </button>
           </div>
 
-          <p className="text-xs text-slate-500 mt-2 text-center">
-            Nhấn Enter để gửi, Shift+Enter để xuống dòng
+          <p className="text-xs text-slate-500 text-center">
+            Nhấn Enter để gửi, Shift+Enter để xuống dòng • Ctrl+V để paste file
           </p>
         </form>
       </div>

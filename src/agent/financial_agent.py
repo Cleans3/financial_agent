@@ -45,7 +45,15 @@ class FinancialAgent:
         
         # Get all tools
         self.tools = get_all_tools()
-        logger.info(f"Loaded {len(self.tools)} tools: {[t.name for t in self.tools]}")
+        tool_names = []
+        for t in self.tools:
+            if hasattr(t, 'name'):
+                tool_names.append(t.name)
+            elif isinstance(t, dict) and 'name' in t:
+                tool_names.append(t['name'])
+            else:
+                tool_names.append(str(t))
+        logger.info(f"Loaded {len(self.tools)} tools: {tool_names}")
         
         # Load system prompt
         prompts_dir = Path(__file__).parent / "prompts"
@@ -61,11 +69,25 @@ class FinancialAgent:
         """Get formatted tool descriptions for prompt"""
         descriptions = []
         for tool in self.tools:
-            args = tool.args_schema.schema()['properties'].keys() if tool.args_schema else 'None'
-            descriptions.append(
-                f"- {tool.name}: {tool.description}\n"
-                f"  Arguments: {', '.join(args)}"
-            )
+            try:
+                # Handle both ToolCall and regular tools
+                tool_name = getattr(tool, 'name', 'unknown')
+                tool_desc = getattr(tool, 'description', 'No description')
+                
+                if hasattr(tool, 'args_schema') and tool.args_schema:
+                    args = tool.args_schema.schema().get('properties', {}).keys()
+                    args_str = ', '.join(args) if args else 'None'
+                else:
+                    args_str = 'None'
+                
+                descriptions.append(
+                    f"- {tool_name}: {tool_desc}\n"
+                    f"  Arguments: {args_str}"
+                )
+            except Exception as e:
+                logger.warning(f"Error getting tool description: {e}")
+                continue
+        
         return "\n\n".join(descriptions)
     
     async def _agent_node(self, state: AgentState) -> AgentState:

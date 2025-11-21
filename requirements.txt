@@ -36,3 +36,9 @@ openpyxl>=3.1.0
 
 # Utilities
 python-dateutil>=2.8.0
+
+# Image & OCR Processing
+pytesseract>=0.3.10
+Pillow>=10.1.0
+opencv-python>=4.8.0
+
