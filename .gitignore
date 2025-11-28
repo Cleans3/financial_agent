@@ -69,3 +69,6 @@ frontend/.nyc_output/
 # Frontend - OS
 frontend/.DS_Store
 frontend/Thumbs.db
+
+# Tesseract Testing
+tesseract_test/

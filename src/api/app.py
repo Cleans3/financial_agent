@@ -15,6 +15,7 @@ from pathlib import Path
 from ..agent import FinancialAgent
 from ..tools.financial_report_tools import analyze_financial_report
 from ..tools.excel_tools import analyze_excel_to_markdown
+from ..tools.pdf_tools import analyze_pdf
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -251,17 +252,19 @@ async def upload_file(
         file_extension = Path(file.filename).suffix.lower()
         
         # Kiểm tra loại file
-        image_types = ["image/png", "image/jpeg", "image/jpg", "application/pdf"]
+        image_types = ["image/png", "image/jpeg", "image/jpg"]
+        pdf_types = ["application/pdf"]
         excel_types = [
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "application/vnd.ms-excel",
             "application/excel"
         ]
         
-        is_image = file.content_type in image_types or file_extension in ['.png', '.jpg', '.jpeg', '.pdf']
+        is_image = file.content_type in image_types or file_extension in ['.png', '.jpg', '.jpeg']
+        is_pdf = file.content_type in pdf_types or file_extension == '.pdf'
         is_excel = file.content_type in excel_types or file_extension in ['.xlsx', '.xls']
         
-        if not (is_image or is_excel):
+        if not (is_image or is_pdf or is_excel):
             raise HTTPException(
                 status_code=400,
                 detail=f"Loại file không được hỗ trợ. Hỗ trợ: PNG, JPG, PDF, XLSX, XLS. Nhận được: {file.content_type}"
@@ -281,7 +284,65 @@ async def upload_file(
             logger.info(f"File saved to: {temp_path}")
         
         # Xử lý theo loại file
-        if is_excel:
+        if is_pdf:
+            logger.info("Processing PDF file...")
+            result = analyze_pdf(temp_path, question)
+            
+            if not result.success:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Lỗi xử lý PDF: {result.message}"
+                )
+            
+            # Kết hợp extracted text và tables markdown
+            combined_data = f"Extracted Text:\n{result.extracted_text}\n\nTables:\n{result.tables_markdown}"
+            
+            # Gửi dữ liệu PDF cho Gemini phân tích nếu có câu hỏi
+            analysis = result.analysis
+            if question.strip():
+                try:
+                    from src.llm.llm_factory import LLMFactory
+                    
+                    logger.info("Sending PDF data to Gemini for analysis...")
+                    
+                    # Đọc system prompt
+                    system_prompt_path = Path(__file__).parent.parent / "agent" / "prompts" / "financial_report_prompt.txt"
+                    if system_prompt_path.exists():
+                        with open(system_prompt_path, 'r', encoding='utf-8') as f:
+                            base_system_prompt = f.read()
+                    else:
+                        base_system_prompt = "Bạn là một chuyên gia tài chính chuyên phân tích báo cáo tài chính doanh nghiệp. Hãy phân tích dữ liệu sau một cách chi tiết, chuyên sâu và đưa ra những insights quý giá cho nhà đầu tư."
+                    
+                    # Kết hợp system prompt + user question
+                    system_prompt = f"{base_system_prompt}\n\n---\n\nYÊU CẦU TỪ NGƯỜI DÙNG:\n{question}"
+                    
+                    # Gọi Gemini
+                    llm = LLMFactory.get_llm()
+                    from langchain_core.messages import SystemMessage, HumanMessage
+                    
+                    messages = [
+                        SystemMessage(content=system_prompt),
+                        HumanMessage(content=f"Phân tích dữ liệu PDF sau:\n\n{combined_data}")
+                    ]
+                    
+                    response = await llm.ainvoke(messages)
+                    analysis = response.content
+                    
+                    logger.info("✓ Gemini analysis completed for PDF")
+                    
+                except Exception as e:
+                    logger.warning(f"Error sending PDF to Gemini: {e}")
+                    analysis = result.analysis
+            
+            return FileAnalysisResponse(
+                success=result.success,
+                report_type=f"PDF Document ({result.processing_method.upper()})",
+                extracted_text=result.extracted_text[:500] + "..." if len(result.extracted_text) > 500 else result.extracted_text,
+                analysis=analysis,
+                message=f"Xử lý PDF thành công. Method: {result.processing_method}"
+            )
+        
+        elif is_excel:
             logger.info("Processing Excel file...")
             result = analyze_excel_to_markdown(temp_path)
             markdown_output = result.get('markdown', '')

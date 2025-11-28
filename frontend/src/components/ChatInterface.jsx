@@ -416,8 +416,9 @@ const ChatInterface = () => {
               type="file"
               onChange={handleFileSelect}
               multiple
-              accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv"
+              accept="image/*,.pdf,.xlsx,.xls,.doc,.docx,.txt,.csv"
               className="hidden"
+              title="Hỗ trợ: PNG, JPG, PDF, Excel, Word, CSV"
             />
 
             {/* Text Input */}
@@ -433,7 +434,7 @@ const ChatInterface = () => {
                          rounded-2xl px-4 py-3 pr-12
                          border border-slate-600 focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20
                          outline-none resize-none transition-all
-                         max-h-32"
+                         max-h-32 overflow-hidden"
                 rows={1}
                 disabled={isLoading}
                 style={{
@@ -442,7 +443,14 @@ const ChatInterface = () => {
                 }}
                 onInput={(e) => {
                   e.target.style.height = "auto";
-                  e.target.style.height = e.target.scrollHeight + "px";
+                  const maxHeight = 128; // max-h-32 = 8rem = 128px
+                  if (e.target.scrollHeight > maxHeight) {
+                    e.target.style.height = maxHeight + "px";
+                    e.target.style.overflowY = "auto";
+                  } else {
+                    e.target.style.height = e.target.scrollHeight + "px";
+                    e.target.style.overflowY = "hidden";
+                  }
                 }}
               />
             </div>

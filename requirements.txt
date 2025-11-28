@@ -42,3 +42,7 @@ pytesseract>=0.3.10
 Pillow>=10.1.0
 opencv-python>=4.8.0
 
+# PDF Processing
+pdfplumber>=0.10.0
+pdf2image>=1.16.0
+
