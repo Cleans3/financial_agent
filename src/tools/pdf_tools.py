@@ -14,8 +14,43 @@ from pdf2image import convert_from_path
 import pytesseract
 from PIL import Image
 from pydantic import BaseModel
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 logger = logging.getLogger(__name__)
+
+
+def _preprocess_image_for_ocr(image: Image.Image) -> Image.Image:
+    """
+    Preprocess image to improve OCR accuracy
+    Apply CLAHE, thresholding, and bilateral filtering
+    
+    Args:
+        image: PIL Image object
+        
+    Returns:
+        Preprocessed PIL Image
+    """
+    import cv2
+    import numpy as np
+    
+    # Convert PIL to numpy/OpenCV format
+    cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    
+    # Convert to grayscale
+    gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+    
+    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    
+    # Thresholding
+    _, thresh = cv2.threshold(enhanced, 150, 255, cv2.THRESH_BINARY)
+    
+    # Denoising with bilateral filter
+    denoised = cv2.bilateralFilter(thresh, 9, 75, 75)
+    
+    # Convert back to PIL
+    return Image.fromarray(denoised)
 
 
 class PDFExtractionResult(BaseModel):
@@ -71,12 +106,16 @@ def extract_text_from_pdf(pdf_path: str) -> PDFExtractionResult:
                 total_pages = len(pdf.pages)
                 logger.info(f"PDF has {total_pages} pages")
                 
+                # Track text extraction per page
+                pages_with_text = 0
+                
                 # Trích xuất text từ tất cả các trang
                 for page_num, page in enumerate(pdf.pages, 1):
                     try:
                         page_text = page.extract_text()
-                        if page_text:
+                        if page_text and page_text.strip():
                             extracted_text += f"\n--- TRANG {page_num} ---\n{page_text}\n"
+                            pages_with_text += 1
                             has_text = True
                         
                         # Trích xuất bảng
@@ -93,6 +132,14 @@ def extract_text_from_pdf(pdf_path: str) -> PDFExtractionResult:
                     except Exception as e:
                         logger.warning(f"Error extracting from page {page_num}: {e}")
                         continue
+                
+                # Only consider it "has_text" if majority of pages have text
+                # (not just a header on page 1)
+                text_ratio = pages_with_text / total_pages if total_pages > 0 else 0
+                if text_ratio < 0.3:  # Less than 30% of pages have text = likely scanned
+                    logger.info(f"Only {text_ratio*100:.1f}% pages have native text. Treating as scanned PDF.")
+                    has_text = False
+                    extracted_text = ""  # Reset for OCR fallback
         
         except Exception as e:
             logger.warning(f"Native extraction failed: {e}")
@@ -136,6 +183,7 @@ def extract_text_from_pdf(pdf_path: str) -> PDFExtractionResult:
 def _extract_text_via_ocr(pdf_path: str) -> str:
     """
     Fallback OCR extraction cho PDF scanned
+    Applies image preprocessing for better OCR accuracy
     
     Args:
         pdf_path: Đường dẫn đến file PDF
@@ -154,8 +202,11 @@ def _extract_text_via_ocr(pdf_path: str) -> str:
             logger.info(f"Running OCR on page {page_num}/{len(images)}...")
             
             try:
+                # Preprocess image for better OCR accuracy
+                processed_image = _preprocess_image_for_ocr(image)
+                
                 # OCR tiếng Việt + tiếng Anh
-                text = pytesseract.image_to_string(image, lang='vie+eng')
+                text = pytesseract.image_to_string(processed_image, lang='vie+eng')
                 if text.strip():
                     extracted_text += f"\n--- TRANG {page_num} ---\n{text}\n"
             except Exception as e:
@@ -215,17 +266,20 @@ def convert_tables_to_markdown(tables: List[Dict[str, Any]]) -> str:
 
 def analyze_pdf(
     pdf_path: str,
-    question: str = ""
+    question: str = "",
+    gemini_api_key: Optional[str] = None
 ) -> PDFAnalysisResult:
     """
     Phân tích file PDF báo cáo tài chính
+    Extracts text, tables, and uses Gemini for intelligent analysis
     
     Args:
         pdf_path: Đường dẫn đến file PDF
         question: Câu hỏi hoặc context thêm từ người dùng (optional)
+        gemini_api_key: API key của Gemini (optional, lấy từ env nếu không có)
         
     Returns:
-        PDFAnalysisResult chứa text, tables, và analysis
+        PDFAnalysisResult chứa text, tables, analysis, và processing method
     """
     try:
         logger.info(f"Analyzing PDF: {pdf_path}")
@@ -253,6 +307,56 @@ def analyze_pdf(
         if tables_markdown:
             combined_text += f"\n\n## Các bảng trong PDF\n\n{tables_markdown}"
         
+        # Bước 4: Gửi đến Gemini để phân tích (nếu có API key)
+        analysis_result = combined_text  # Default fallback
+        
+        try:
+            api_key = gemini_api_key or os.getenv("GOOGLE_API_KEY")
+            if api_key:
+                logger.info("Sending PDF content to Gemini for analysis...")
+                
+                # Load prompt chuyên biệt
+                prompt_path = Path(__file__).parent.parent / "agent" / "prompts" / "financial_report_prompt.txt"
+                if prompt_path.exists():
+                    with open(prompt_path, 'r', encoding='utf-8') as f:
+                        system_prompt = f.read()
+                else:
+                    system_prompt = "Bạn là chuyên gia phân tích báo cáo tài chính. Phân tích text và bảng dưới đây."
+                
+                llm = ChatGoogleGenerativeAI(
+                    api_key=api_key,
+                    model="gemini-2.0-flash",
+                    temperature=0.3
+                )
+                
+                analysis_prompt = f"""
+{system_prompt}
+
+TÀI LIỆU PDF ĐÃ ĐƯỢC TRÍCH XUẤT:
+
+{combined_text[:5000]}
+
+{'...' if len(combined_text) > 5000 else ''}
+
+---
+
+NHIỆM VỤ:
+1. Phân tích dữ liệu tài chính
+2. Trích xuất thông tin chính
+3. Nhận xét về xu hướng và sức khỏe tài chính
+
+Vui lòng trả lời chi tiết và có cấu trúc rõ ràng.
+"""
+                
+                message = llm.invoke(analysis_prompt)
+                analysis_result = message.content
+                logger.info("Gemini analysis completed successfully")
+        
+        except Exception as e:
+            logger.warning(f"Gemini analysis failed, using raw extraction: {e}")
+            # Fallback to extracted text if Gemini fails
+            pass
+        
         logger.info("PDF analysis completed")
         
         return PDFAnalysisResult(
@@ -261,7 +365,7 @@ def analyze_pdf(
             total_pages=extraction_result.total_pages,
             extracted_text=extraction_result.extracted_text,
             tables_markdown=tables_markdown,
-            analysis=combined_text,  # Sẽ được xử lý thêm bởi LLM
+            analysis=analysis_result,
             processing_method="native" if extraction_result.has_text else "ocr",
             message=extraction_result.message
         )

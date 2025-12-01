@@ -41,6 +41,10 @@ def extract_text_from_image(image_path: str) -> str:
         
     Returns:
         Text đã trích xuất
+        
+    Raises:
+        FileNotFoundError: If image file not found
+        ValueError: If OCR extraction fails
     """
     try:
         logger.info(f"Starting OCR for image: {image_path}")
@@ -73,6 +77,9 @@ def extract_text_from_image(image_path: str) -> str:
         logger.info(f"OCR successful. Extracted {len(text)} characters")
         return text
         
+    except (FileNotFoundError, ValueError):
+        # Re-raise these expected errors
+        raise
     except Exception as e:
         logger.error(f"Error during OCR: {e}")
         raise
@@ -96,13 +103,47 @@ def analyze_financial_report(
         # Lấy API key
         api_key = gemini_api_key or os.getenv("GOOGLE_API_KEY")
         if not api_key:
-            raise ValueError("GOOGLE_API_KEY không được cấu hình")
+            return FinancialReportResult(
+                success=False,
+                report_type="Lỗi",
+                company="N/A",
+                period="N/A",
+                extracted_text="",
+                markdown_table="",
+                analysis="",
+                message="GOOGLE_API_KEY không được cấu hình"
+            )
         
         logger.info(f"Analyzing financial report: {image_path}")
         
         # Bước 1: OCR từ hình ảnh
         logger.info("Step 1: Extracting text from image...")
-        extracted_text = extract_text_from_image(image_path)
+        try:
+            extracted_text = extract_text_from_image(image_path)
+        except FileNotFoundError as e:
+            logger.error(f"File not found: {e}")
+            return FinancialReportResult(
+                success=False,
+                report_type="Lỗi",
+                company="N/A",
+                period="N/A",
+                extracted_text="",
+                markdown_table="",
+                analysis="",
+                message=f"Không tìm thấy file: {str(e)}"
+            )
+        except ValueError as e:
+            logger.error(f"OCR extraction failed: {e}")
+            return FinancialReportResult(
+                success=False,
+                report_type="Lỗi",
+                company="N/A",
+                period="N/A",
+                extracted_text="",
+                markdown_table="",
+                analysis="",
+                message=f"Lỗi OCR: {str(e)}"
+            )
         
         # Bước 2: Load prompt chuyên biệt
         prompt_path = Path(__file__).parent.parent / "agent" / "prompts" / "financial_report_prompt.txt"
@@ -116,14 +157,15 @@ def analyze_financial_report(
         # Bước 3: Gửi đến Gemini để phân tích
         logger.info("Step 2: Sending to Gemini for analysis...")
         
-        llm = ChatGoogleGenerativeAI(
-            api_key=api_key,
-            model="gemini-2.0-flash",
-            temperature=0.3
-        )
-        
-        # Tạo prompt phân tích
-        analysis_prompt = f"""
+        try:
+            llm = ChatGoogleGenerativeAI(
+                api_key=api_key,
+                model="gemini-2.0-flash",
+                temperature=0.3
+            )
+            
+            # Tạo prompt phân tích
+            analysis_prompt = f"""
 {system_prompt}
 
 HÌNH ẢNH BÁOCÁO ĐÃ ĐƯỢC OCR:
@@ -140,26 +182,39 @@ NHIỆM VỤ:
 
 Vui lòng trả lời theo đúng định dạng hướng dẫn.
 """
+            
+            message = llm.invoke(analysis_prompt)
+            analysis_result = message.content
+            
+            logger.info("Analysis completed successfully")
+            
+            # Bước 4: Trích xuất kết quả
+            return FinancialReportResult(
+                success=True,
+                report_type="Báo cáo tài chính",
+                company="Được trích xuất từ báo cáo",
+                period="Được trích xuất từ báo cáo",
+                extracted_text=extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text,
+                markdown_table="(Xem phần phân tích dưới đây)",
+                analysis=analysis_result,
+                message="Phân tích báo cáo tài chính thành công"
+            )
         
-        message = llm.invoke(analysis_prompt)
-        analysis_result = message.content
-        
-        logger.info("Analysis completed successfully")
-        
-        # Bước 4: Trích xuất kết quả
-        return FinancialReportResult(
-            success=True,
-            report_type="Báo cáo tài chính",
-            company="Được trích xuất từ báo cáo",
-            period="Được trích xuất từ báo cáo",
-            extracted_text=extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text,
-            markdown_table="(Xem phần phân tích dưới đây)",
-            analysis=analysis_result,
-            message="Phân tích báo cáo tài chính thành công"
-        )
+        except Exception as e:
+            logger.error(f"Gemini API error: {e}")
+            return FinancialReportResult(
+                success=False,
+                report_type="Lỗi",
+                company="N/A",
+                period="N/A",
+                extracted_text=extracted_text[:500] if extracted_text else "",
+                markdown_table="",
+                analysis="",
+                message=f"Lỗi gọi API Gemini: {str(e)}"
+            )
         
     except Exception as e:
-        logger.error(f"Error analyzing report: {e}")
+        logger.error(f"Unexpected error analyzing report: {e}")
         return FinancialReportResult(
             success=False,
             report_type="Lỗi",
