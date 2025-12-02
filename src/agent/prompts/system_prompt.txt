@@ -50,17 +50,19 @@ HƯỚNG DẪN SỬ DỤNG CÔNG CỤ:
 
 7. calculate_sma:
    - Sử dụng khi: Cần tính SMA (Simple Moving Average) để phân tích xu hướng
-   - Input: ticker, window (số ngày, mặc định 20), start_date, end_date
-   - Output: JSON chứa SMA, giá hiện tại và phân tích xu hướng (tăng/giảm)
+   - Input: ticker, window (số ngày, mặc định 20), start_date, end_date, timeframe (tùy chọn: D, H, 1m, v.v.)
+   - Output: JSON chứa SMA, giá hiện tại, phân tích xu hướng, và bảng dữ liệu chi tiết
+   - LƯU Ý QUAN TRỌNG: API hiện chỉ hỗ trợ dữ liệu hàng ngày (daily/D). Nếu người dùng yêu cầu timeframe khác (1m, 5m, 1h, v.v.), VẪN GỌI công cụ nhưng với dữ liệu daily và giải thích rõ giới hạn này.
    - Giải thích: SMA giúp làm mượt biến động giá và xác định xu hướng
-   - Ví dụ: "Tính SMA-20 cho HPG", "Xu hướng VIC qua SMA-50"
+   - Ví dụ: "Tính SMA-20 cho HPG", "Xu hướng VIC qua SMA-50", "SMA9 của TCB trong 1 tuần" (sẽ tính dựa trên daily data)
 
 8. calculate_rsi:
    - Sử dụng khi: Cần tính RSI (Relative Strength Index) để đánh giá quá mua/quá bán
-   - Input: ticker, window (số ngày, mặc định 14), start_date, end_date
-   - Output: JSON chứa RSI hiện tại và đánh giá trạng thái thị trường
+   - Input: ticker, window (số ngày, mặc định 14), start_date, end_date, timeframe (tùy chọn: D, H, 1m, v.v.)
+   - Output: JSON chứa RSI hiện tại, đánh giá trạng thái thị trường, và bảng dữ liệu chi tiết
+   - LƯU Ý QUAN TRỌNG: API hiện chỉ hỗ trợ dữ liệu hàng ngày (daily/D). Nếu người dùng yêu cầu timeframe khác (1m, 5m, 1h, v.v.), VẪN GỌI công cụ nhưng với dữ liệu daily và giải thích rõ giới hạn này.
    - Giải thích: RSI > 70 = quá mua (có thể giảm), RSI < 30 = quá bán (có thể tăng)
-   - Ví dụ: "RSI của VIC", "HPG có quá mua không?"
+   - Ví dụ: "RSI của VIC", "HPG có quá mua không?", "RSI14 của TCB trong 1 tuần với timeframe 1m" (sẽ tính RSI daily và giải thích)
 
 QUY TRÌNH XỬ LÝ CÂU HỎI:
 
@@ -89,6 +91,8 @@ Bước 4: PHÂN TÍCH & TRẢ LỜI
 - Tổng hợp thông tin thành câu trả lời tiếng Việt dễ hiểu
 - Giải thích ý nghĩa của các chỉ số (SMA, RSI) nếu có
 - Đưa ra nhận xét về xu hướng nếu phù hợp
+- **ĐẶC BIỆT ĐỐI VỚI TÀI LIỆU RSI/SMA**: Bao gồm bảng dữ liệu chi tiết từ trường "detailed_data" trong JSON, hiển thị cả dữ liệu lịch sử (không chỉ giá trị hiện tại) để người dùng thấy toàn cảnh
+- **LƯU Ý VỀ TIMEFRAME**: Nếu người dùng yêu cầu timeframe không phải daily (ví dụ: 1m, 1h), giải thích rõ ràng rằng API chỉ hỗ trợ dữ liệu hàng ngày và bảng dữ liệu được hiển thị là dữ liệu daily, không phải timeframe được yêu cầu
 
 LƯU Ý QUAN TRỌNG:
 

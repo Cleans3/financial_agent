@@ -35,6 +35,10 @@ class SMAInput(BaseModel):
         None,
         description="Ngày kết thúc format YYYY-MM-DD"
     )
+    timeframe: Optional[str] = Field(
+        None,
+        description="Khung thời gian dữ liệu (D=daily, H=hourly, 1m=1 phút). Chú ý: hiện tại chỉ hỗ trợ 'D' (daily)"
+    )
     
     @validator('ticker')
     def validate_ticker(cls, value):
@@ -58,6 +62,15 @@ class SMAInput(BaseModel):
         except ValueError:
             raise ValueError(f"Ngày không hợp lệ: {value}")
         return value
+    
+    @validator('timeframe')
+    def validate_timeframe(cls, value):
+        if value is None:
+            return value
+        valid_timeframes = ['D', 'H', '1m', '5m', '15m', '30m', '1h', '4h']
+        if value.upper() not in valid_timeframes:
+            raise ValueError(f"Timeframe phải là một trong: {', '.join(valid_timeframes)}")
+        return value.upper()
 
 
 class RSIInput(BaseModel):
@@ -76,6 +89,10 @@ class RSIInput(BaseModel):
     end_date: Optional[str] = Field(
         None,
         description="Ngày kết thúc format YYYY-MM-DD"
+    )
+    timeframe: Optional[str] = Field(
+        None,
+        description="Khung thời gian dữ liệu (D=daily, H=hourly, 1m=1 phút). Chú ý: hiện tại chỉ hỗ trợ 'D' (daily)"
     )
     
     @validator('ticker')
@@ -100,6 +117,15 @@ class RSIInput(BaseModel):
         except ValueError:
             raise ValueError(f"Ngày không hợp lệ: {value}")
         return value
+    
+    @validator('timeframe')
+    def validate_timeframe(cls, value):
+        if value is None:
+            return value
+        valid_timeframes = ['D', 'H', '1m', '5m', '15m', '30m', '1h', '4h']
+        if value.upper() not in valid_timeframes:
+            raise ValueError(f"Timeframe phải là một trong: {', '.join(valid_timeframes)}")
+        return value.upper()
 
 
 # ============================================
@@ -111,7 +137,8 @@ def calculate_sma(
     ticker: str,
     window: int = 20,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    timeframe: Optional[str] = None
 ) -> str:
     """
     Tính Simple Moving Average (SMA) cho mã chứng khoán.
@@ -127,15 +154,22 @@ def calculate_sma(
         window: Số ngày tính trung bình (mặc định 20)
         start_date: Ngày bắt đầu format YYYY-MM-DD
         end_date: Ngày kết thúc format YYYY-MM-DD
+        timeframe: Khung thời gian (D=daily, H=hourly, 1m=1 phút). Hiện tại chỉ hỗ trợ daily (D)
         
     Returns:
         JSON string chứa kết quả tính SMA và phân tích xu hướng
         
     Example:
         calculate_sma(ticker="HPG", window=20, start_date="2023-01-01", end_date="2023-06-30")
+        calculate_sma(ticker="TCB", window=14, timeframe="1m")  # Note: sẽ dùng daily data
     """
     try:
         ticker = ticker.upper().strip()
+        
+        # Handle timeframe - current API only supports daily data
+        timeframe_note = ""
+        if timeframe and timeframe != 'D':
+            timeframe_note = f" (Lưu ý: API hiện chỉ hỗ trợ dữ liệu hàng ngày, không hỗ trợ khung thời gian {timeframe}. Đang tính SMA dựa trên dữ liệu daily)"
         
         # Default dates if not provided
         if not end_date:
@@ -202,6 +236,7 @@ def calculate_sma(
             "success": True,
             "ticker": ticker,
             "indicator": f"SMA-{window}",
+            "timeframe": timeframe or "D",
             "current_values": {
                 "price": current_price,
                 "sma": current_sma,
@@ -215,7 +250,7 @@ def calculate_sma(
                 "interpretation": f"Giá hiện tại {'cao hơn' if current_price > current_sma else 'thấp hơn'} SMA-{window} khoảng {abs(current_price - current_sma):.2f} điểm ({abs((current_price - current_sma) / current_sma * 100):.2f}%). SMA đang {sma_trend}."
             },
             "detailed_data": recent_records,  # Full detailed data for table display
-            "message": f"Đã tính SMA-{window} cho {ticker} thành công. Dữ liệu chi tiết gồm {len(recent_records)} ngày gần nhất."
+            "message": f"Đã tính SMA-{window} cho {ticker} thành công{timeframe_note}. Dữ liệu chi tiết gồm {len(recent_records)} ngày gần nhất."
         }
         
         return json.dumps(result, ensure_ascii=False, indent=2)
@@ -233,7 +268,8 @@ def calculate_rsi(
     ticker: str,
     window: int = 14,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    timeframe: Optional[str] = None
 ) -> str:
     """
     Tính Relative Strength Index (RSI) cho mã chứng khoán.
@@ -248,15 +284,22 @@ def calculate_rsi(
         window: Số ngày tính RSI (mặc định 14)
         start_date: Ngày bắt đầu format YYYY-MM-DD
         end_date: Ngày kết thúc format YYYY-MM-DD
+        timeframe: Khung thời gian (D=daily, H=hourly, 1m=1 phút). Hiện tại chỉ hỗ trợ daily (D)
         
     Returns:
         JSON string chứa kết quả tính RSI và phân tích
         
     Example:
         calculate_rsi(ticker="VIC", window=14, start_date="2023-05-01", end_date="2023-05-31")
+        calculate_rsi(ticker="TCB", window=14, timeframe="1m")  # Note: sẽ chuyển về daily
     """
     try:
         ticker = ticker.upper().strip()
+        
+        # Handle timeframe - current API only supports daily data
+        timeframe_note = ""
+        if timeframe and timeframe != 'D':
+            timeframe_note = f" (Lưu ý: API hiện chỉ hỗ trợ dữ liệu hàng ngày, không hỗ trợ khung thời gian {timeframe}. Đang tính RSI dựa trên dữ liệu daily)"
         
         # Default dates if not provided
         if not end_date:
@@ -336,6 +379,7 @@ def calculate_rsi(
             "success": True,
             "ticker": ticker,
             "indicator": f"RSI-{window}",
+            "timeframe": timeframe or "D",
             "current_values": {
                 "price": current_price,
                 "rsi": current_rsi
@@ -353,7 +397,7 @@ def calculate_rsi(
                 "neutral_range": "30-70"
             },
             "detailed_data": recent_records,  # Full detailed data for table display
-            "message": f"Đã tính RSI-{window} cho {ticker} thành công. Dữ liệu chi tiết gồm {len(recent_records)} ngày gần nhất."
+            "message": f"Đã tính RSI-{window} cho {ticker} thành công{timeframe_note}. Dữ liệu chi tiết gồm {len(recent_records)} ngày gần nhất."
         }
         
         return json.dumps(result, ensure_ascii=False, indent=2)

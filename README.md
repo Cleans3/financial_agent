@@ -32,6 +32,26 @@
   - RSI < 30: Quá bán (cơ hội tăng)
   - Hiển thị bảng chi tiết với trạng thái
 
+### 📄 Xử lý Tài liệu
+
+- ✅ **Phân tích Báo cáo Tài chính (Hình ảnh)**: 
+  - OCR từ ảnh PDF/PNG/JPG
+  - Phân loại báo cáo: BCDN, KQKD, Dòng tiền, Chỉ số
+  - Trích xuất dữ liệu + tạo bảng Markdown
+  - Phân tích Gemini AI chi tiết
+
+- ✅ **Xử lý File PDF**:
+  - Trích xuất text từ PDF native
+  - OCR tự động cho PDF scanned
+  - Bảng và dữ liệu có cấu trúc
+  - Phân tích thông minh với Gemini
+
+- ✅ **Phân tích File Excel**:
+  - Chuyển đổi thành bảng Markdown
+  - Hỗ trợ nhiều sheet
+  - Định dạng số chuẩn Việt Nam
+  - Phân tích tài chính chi tiết
+
 ### 🎯 Định dạng trả lời
 
 - 📋 **Bảng Markdown** với dữ liệu chi tiết, dễ đọc
@@ -47,10 +67,15 @@
 - **Backend**: FastAPI (REST API)
 - **Agent Framework**: LangChain + LangGraph (ReAct Pattern)
 - **LLM Providers**:
-  - ☁️ Google Gemini (Cloud)
-  - 🖥️ Ollama (Local)
+  - ☁️ Google Gemini (Cloud) - cho phân tích tài chính & OCR
+  - 🖥️ Ollama (Local) - cho chat & phân tích
 - **Data Source**: VnStock3 API (Free)
 - **Technical Analysis**: TA-Lib
+- **Document Processing**: 
+  - pytesseract + OpenCV (OCR)
+  - pdfplumber (PDF text extraction)
+  - pdf2image (PDF to image conversion)
+- **Excel Processing**: openpyxl + pandas
 - **Frontend**: React + Vite + TailwindCSS
 
 ### Cấu trúc thư mục:
@@ -62,9 +87,15 @@ financial_agent/
 │   │   ├── financial_agent.py
 │   │   ├── state.py
 │   │   └── prompts/
-│   ├── tools/          # 8 Tools
-│   │   ├── vnstock_tools.py    # 6 VnStock tools
-│   │   └── technical_tools.py  # 2 Technical tools
+│   │       ├── system_prompt.txt
+│   │       ├── financial_report_prompt.txt
+│   │       └── excel_analysis_prompt.txt
+│   ├── tools/          # 11+ Tools
+│   │   ├── vnstock_tools.py        # 5 VnStock tools
+│   │   ├── technical_tools.py      # 2 Technical analysis tools
+│   │   ├── financial_report_tools.py  # Financial report analysis (OCR + Gemini)
+│   │   ├── pdf_tools.py            # PDF document processing
+│   │   └── excel_tools.py          # Excel analysis tools
 │   ├── llm/            # LLM Factory
 │   │   ├── llm_factory.py
 │   │   └── config.py
@@ -192,6 +223,40 @@ OLLAMA_BASE_URL=http://localhost:11434
 - Nếu gặp lỗi "out of memory", thử model nhỏ hơn hoặc chuyển sang Gemini
 - Kiểm tra Ollama đang chạy: `ollama list`
 
+### Bước 6: Cấu hình Tesseract OCR (cho phân tích báo cáo tài chính)
+
+Tesseract được dùng để OCR hình ảnh báo cáo tài chính. Có thể bỏ qua nếu chỉ dùng Gemini Vision hoặc PDF native.
+
+#### Windows:
+
+1. Tải installer: https://github.com/UB-Mannheim/tesseract/wiki
+2. Chạy `tesseract-ocr-w64-setup-v5.x.exe`
+3. Cài đặt theo hướng dẫn (mặc định: `C:\Program Files\Tesseract-OCR`)
+4. Cập nhật `.env`:
+
+```env
+# Optional: Chỉ cần nếu install ở vị trí custom
+TESSERACT_PATH=C:\Program Files\Tesseract-OCR\tesseract.exe
+```
+
+#### Linux (Ubuntu/Debian):
+
+```bash
+sudo apt-get install tesseract-ocr libtesseract-dev
+```
+
+#### macOS:
+
+```bash
+brew install tesseract
+```
+
+#### Kiểm tra cài đặt:
+
+```bash
+tesseract --version
+```
+
 ---
 
 ## 🎮 Chạy ứng dụng
@@ -302,6 +367,33 @@ Chi tiết xem file `TESTING.md`
 - "So sánh giá VCB và TCB trong 6 tháng"
 ```
 
+### Tải lên và phân tích tài liệu:
+
+**Báo cáo tài chính (Hình ảnh):**
+
+Gửi hình ảnh báo cáo tài chính (BCDN, KQKD, Dòng tiền):
+```
+- Upload file PNG/JPG của báo cáo
+- Agent sẽ OCR + phân tích + tạo bảng Markdown
+```
+
+**File PDF:**
+
+Gửi file PDF báo cáo tài chính:
+```
+- Upload file PDF (native text hoặc scanned)
+- Agent sẽ trích xuất text + bảng
+- Phân tích chi tiết với AI
+```
+
+**File Excel:**
+
+Gửi file Excel dữ liệu tài chính:
+```
+- Upload file .xlsx/.xls
+- Agent sẽ chuyển đổi thành Markdown
+- Phân tích dữ liệu tài chính
+
 ---
 
 ## 🔧 Cấu hình nâng cao
@@ -353,9 +445,30 @@ ollama pull qwen2.5:3b
 
 ### Tùy chỉnh System Prompt
 
-Chỉnh sửa file: `src/agent/prompts/system_prompt.txt`
+ Chỉnh sửa các file prompt:
+
+- `src/agent/prompts/system_prompt.txt` - Prompt chính của agent
+- `src/agent/prompts/financial_report_prompt.txt` - Prompt phân tích báo cáo tài chính
+- `src/agent/prompts/excel_analysis_prompt.txt` - Prompt phân tích Excel
 
 Restart server để áp dụng thay đổi.
+
+### Cấu hình Tesseract OCR
+
+```env
+# Optional: Chỉ cần nếu Tesseract ở vị trí custom
+TESSERACT_PATH=C:\Program Files\Tesseract-OCR\tesseract.exe
+```
+
+### Cấu hình LLM Parameters
+
+```env
+# Nhiệt độ (0.0-1.0): Cao = sáng tạo, Thấp = chính xác
+LLM_TEMPERATURE=0.3
+
+# Độ dài tối đa của response
+LLM_MAX_TOKENS=2048
+```
 
 ---
 
@@ -379,6 +492,68 @@ Restart server để áp dụng thay đổi.
 }
 ```
 
+### Endpoint: `POST /api/upload/financial-report`
+
+Phân tích báo cáo tài chính từ hình ảnh (PNG, JPG, PDF).
+
+**Request:**
+- `file`: Tập tin hình ảnh báo cáo (PNG, JPG, PDF)
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "report_type": "BCDN",
+  "company": "Công ty ABC",
+  "period": "Q3/2024",
+  "extracted_text": "...",
+  "markdown_table": "| Chỉ tiêu | Giá trị |\n...",
+  "analysis": "Phân tích chi tiết từ Gemini..."
+}
+```
+
+### Endpoint: `POST /api/upload/pdf`
+
+Phân tích file PDF báo cáo tài chính.
+
+**Request:**
+- `file`: File PDF
+- `question`: (Optional) Câu hỏi cụ thể về PDF
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "file_name": "financial_report.pdf",
+  "total_pages": 5,
+  "extracted_text": "...",
+  "tables_markdown": "| Bảng 1 | ... |\n...",
+  "analysis": "Phân tích tài chính chi tiết",
+  "processing_method": "native"
+}
+```
+
+### Endpoint: `POST /api/upload/excel`
+
+Phân tích file Excel dữ liệu tài chính.
+
+**Request:**
+- `file`: File Excel (.xlsx, .xls)
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "file_name": "financial_data.xlsx",
+  "sheet_count": 3,
+  "markdown": "# Phân tích dữ liệu từ file: financial_data\n\n**Tóm tắt:** File chứa 3 bảng tính\n\n## Sheet 1: Revenue\n| Tháng | Doanh thu |\n...",
+  "message": "Phân tích file Excel thành công"
+}
+```
+
 ### Swagger UI
 
 Mở trình duyệt: **http://localhost:8000/docs**
@@ -388,19 +563,51 @@ Mở trình duyệt: **http://localhost:8000/docs**
 ```python
 import requests
 
+# Chat endpoint
 response = requests.post(
     "http://localhost:8000/api/chat",
     json={"question": "Giá VCB 3 tháng gần nhất"}
 )
 print(response.json()["answer"])
+
+# Upload financial report
+with open("report.png", "rb") as f:
+    files = {"file": f}
+    response = requests.post(
+        "http://localhost:8000/api/upload/financial-report",
+        files=files
+    )
+    print(response.json())
+
+# Upload Excel file
+with open("data.xlsx", "rb") as f:
+    files = {"file": f}
+    response = requests.post(
+        "http://localhost:8000/api/upload/excel",
+        files=files
+    )
+    print(response.json())
 ```
 
 ### Example với cURL
 
 ```bash
+# Chat endpoint
 curl -X POST "http://localhost:8000/api/chat" \
   -H "Content-Type: application/json" \
   -d '{"question": "Tính SMA-20 cho HPG"}'
+
+# Upload financial report
+curl -X POST "http://localhost:8000/api/upload/financial-report" \
+  -F "file=@report.png"
+
+# Upload PDF
+curl -X POST "http://localhost:8000/api/upload/pdf" \
+  -F "file=@financial_report.pdf"
+
+# Upload Excel
+curl -X POST "http://localhost:8000/api/upload/excel" \
+  -F "file=@financial_data.xlsx"
 ```
 
 ---
@@ -553,6 +760,105 @@ sudo systemctl restart ollama
 
 # Test model
 ollama run qwen2.5:3b "Hello"
+```
+
+### Lỗi OCR / Phân tích báo cáo tài chính
+
+**Lỗi: "Tesseract not found"**
+
+```bash
+# Cài đặt Tesseract (xem phần setup ở trên)
+# Hoặc dùng Gemini Vision API (khuyến nghị)
+```
+
+**Lỗi: "GOOGLE_API_KEY không được cấu hình"**
+
+```bash
+# Đảm bảo .env có:
+GOOGLE_API_KEY=your_key_here
+LLM_PROVIDER=gemini  # hoặc "ollama"
+```
+
+**Kết quả OCR kém**
+
+- Thử upload hình ảnh chất lượng cao hơn
+- Hình ảnh nên có độ sáng tốt, không bị xoay
+- Dùng Gemini Vision thay vì Tesseract
+- Kiểm tra lại `TESSERACT_PATH` nếu dùng Tesseract custom
+
+### Lỗi Phân tích PDF
+
+**Lỗi: "Failed to extract text"**
+
+- Kiểm tra file PDF có hỏng không
+- Thử PDF khác để test
+- PDF scanned sẽ dùng OCR fallback (chậm hơn)
+
+**Lỗi: "Gemini analysis failed"**
+
+- Kiểm tra API key có hợp lệ không
+- Giới hạn request: kiểm tra quota Gemini API
+- Thử lại sau vài phút
+
+### Lỗi Phân tích Excel
+
+**Lỗi: "Cannot read file"**
+
+- Đảm bảo file Excel không bị corrupt
+- Thử lưu file dưới định dạng .xlsx
+- Kiểm tra quyền truy cập file
+
+**Dữ liệu hiển thị sai**
+
+- Kiểm tra format Excel (không có dòng/cột trống kỳ lạ)
+- Tăng `max_rows_per_sheet` nếu dữ liệu bị cắt
+- Cột số phải có format số, không phải text
+
+### Chat API không hoạt động
+
+**Lỗi: "Agent initialization failed"**
+
+```bash
+# Kiểm tra tools
+python -c "from src.tools import get_all_tools; print(len(get_all_tools()))"
+
+# Kiểm tra LLM provider
+python -c "from src.llm import LLMFactory; print(LLMFactory.get_llm())"
+```
+
+**Chat response chậm**
+
+- Model LLM yếu: nâng cấp model hoặc dùng Gemini
+- Máy tính không đủ RAM: giảm model size hoặc dùng cloud
+- Network chậm: kiểm tra kết nối internet
+
+### Upload file API
+
+**Lỗi: "File size too large"**
+
+- Giới hạn file mặc định: 50MB
+- Chia nhỏ file lớn thành nhiều file nhỏ
+- Kiểm tra cấu hình FastAPI
+
+**Lỗi: "Unsupported file type"**
+
+- Báo cáo tài chính: PNG, JPG, PDF
+- Excel: .xlsx, .xls
+- PDF: .pdf
+
+### Logs & Debugging
+
+```bash
+# Xem logs chi tiết (Linux/Mac)
+tail -f terminal_output.log
+
+# Xem logs real-time từ server
+# Mở terminal nơi chạy FastAPI, sẽ thấy logs đầy đủ
+
+# Debug mode
+# Thêm vào .env:
+DEBUG=True
+LOG_LEVEL=DEBUG
 ```
 
 ---

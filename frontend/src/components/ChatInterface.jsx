@@ -227,10 +227,14 @@ const ChatInterface = () => {
     const items = e.clipboardData?.items;
     if (!items) return;
 
+    let hasFiles = false;
+
     for (let i = 0; i < items.length; i++) {
       if (items[i].kind === "file") {
         const file = items[i].getAsFile();
-        if (file) {
+        // Only treat as file if it's an actual image or document
+        if (file && (file.type.startsWith("image/") || file.type.includes("pdf") || file.type.includes("sheet") || file.type.includes("document"))) {
+          hasFiles = true;
           const reader = new FileReader();
           reader.onload = (event) => {
             setUploadedFiles((prev) => [
@@ -248,6 +252,12 @@ const ChatInterface = () => {
         }
       }
     }
+
+    // If we processed files, prevent default paste behavior
+    if (hasFiles) {
+      e.preventDefault();
+    }
+    // Otherwise allow normal text paste
   };
 
   const handleDragOver = (e) => {
