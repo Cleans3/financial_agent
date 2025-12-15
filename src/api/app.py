@@ -398,47 +398,107 @@ async def upload_file(
             logger.info("Processing image file...")
             result = analyze_financial_report(temp_path)
             analysis = result.analysis
+            extracted_text = result.extracted_text
+            report_type = result.report_type
             
-            # Gửi ảnh analysis đến Gemini với system prompt nếu có câu hỏi
-            if question.strip():
-                try:
-                    from src.llm.llm_factory import LLMFactory
+            try:
+                from src.llm.llm_factory import LLMFactory
+                from langchain_core.messages import SystemMessage, HumanMessage
+                
+                llm = LLMFactory.get_llm()
+                
+                # Determine how to process the image based on context
+                if question.strip():
+                    # User provided a specific question - use it as context
+                    logger.info("User provided question - processing image with context...")
                     
-                    logger.info("Sending image analysis to Gemini for processing...")
+                    # Combine the extracted text with the user question
+                    # Let the agent decide how to handle it (financial analysis or regular question)
+                    agent_instance = get_agent()
                     
-                    # Đọc system prompt từ file
-                    system_prompt_path = Path(__file__).parent.parent / "agent" / "prompts" / "excel_analysis_prompt.txt"
-                    if system_prompt_path.exists():
-                        with open(system_prompt_path, 'r', encoding='utf-8') as f:
-                            base_system_prompt = f.read()
+                    # Combine extracted text with user question
+                    combined_query = f"Tôi đã upload một ảnh có nội dung sau:\n\n{extracted_text}\n\n---\n\nCâu hỏi của tôi là: {question}"
+                    
+                    # Use the financial agent to handle the question
+                    analysis = await agent_instance.aquery(combined_query)
+                    
+                    logger.info("✓ Agent processed image with user question")
+                else:
+                    # No user question provided - check if content looks like a financial report or a general question
+                    logger.info("No question provided - analyzing image content type...")
+                    
+                    # Use LLM to determine content type and extract question if any
+                    classification_prompt = f"""Analyze this extracted text from an image and determine:
+1. Is this a financial report/statement? (yes/no)
+2. If not, what type of content is it? (e.g., screenshot of question, chart, document, etc.)
+3. If it contains a question, extract it.
+
+Extracted text:
+{extracted_text}
+
+Respond in JSON format:
+{{"is_financial_report": true/false, "content_type": "...", "question": "..." (if any)}}"""
+                    
+                    classification_response = await llm.ainvoke([
+                        HumanMessage(content=classification_prompt)
+                    ])
+                    
+                    try:
+                        import json as json_module
+                        classification = json_module.loads(classification_response.content)
+                        is_financial = classification.get("is_financial_report", False)
+                        extracted_question = classification.get("question", "")
+                    except:
+                        # Default to financial report if classification fails
+                        is_financial = True
+                        extracted_question = ""
+                    
+                    # Process based on content type
+                    if is_financial:
+                        # Process as financial report
+                        logger.info("Content identified as financial report - using financial analysis")
+                        system_prompt_path = Path(__file__).parent.parent / "agent" / "prompts" / "financial_report_prompt.txt"
+                        if system_prompt_path.exists():
+                            with open(system_prompt_path, 'r', encoding='utf-8') as f:
+                                base_system_prompt = f.read()
+                        else:
+                            base_system_prompt = "Bạn là một chuyên gia tài chính chuyên phân tích báo cáo tài chính doanh nghiệp. Hãy phân tích dữ liệu sau một cách chi tiết, chuyên sâu và đưa ra những insights quý giá cho nhà đầu tư."
+                        
+                        system_prompt = base_system_prompt
+                        messages = [
+                            SystemMessage(content=system_prompt),
+                            HumanMessage(content=f"Phân tích dữ liệu từ báo cáo tài chính (đã OCR):\n\n{extracted_text}")
+                        ]
+                        response = await llm.ainvoke(messages)
+                        analysis = response.content
+                        report_type = "Financial Report (Image)"
                     else:
-                        base_system_prompt = "Bạn là một chuyên gia tài chính chuyên phân tích báo cáo tài chính doanh nghiệp. Hãy phân tích dữ liệu sau một cách chi tiết, chuyên sâu và đưa ra những insights quý giá cho nhà đầu tư."
+                        # Process as general question or content
+                        logger.info("Content identified as non-financial - using general agent")
+                        agent_instance = get_agent()
+                        
+                        if extracted_question:
+                            # If a question was extracted, answer it with the context
+                            combined_query = f"Dựa trên nội dung ảnh sau:\n\n{extracted_text}\n\n---\n\nCâu hỏi: {extracted_question}"
+                            analysis = await agent_instance.aquery(combined_query)
+                        else:
+                            # Just provide information about the content
+                            combined_query = f"Đây là nội dung từ ảnh được OCR:\n\n{extracted_text}\n\nHãy tóm tắt hoặc phân tích nội dung này."
+                            analysis = await agent_instance.aquery(combined_query)
+                        
+                        report_type = f"Image ({classification.get('content_type', 'Unknown')})"
                     
-                    # Kết hợp system prompt + user question
-                    system_prompt = f"{base_system_prompt}\n\n---\n\nYÊU CẦU TỪ NGƯỜI DÙNG:\n{question}"
-                    
-                    # Gọi Gemini
-                    llm = LLMFactory.get_llm()
-                    from langchain_core.messages import SystemMessage, HumanMessage
-                    
-                    messages = [
-                        SystemMessage(content=system_prompt),
-                        HumanMessage(content=f"Dữ liệu từ báo cáo tài chính (đã OCR):\n\n{result.extracted_text}")
-                    ]
-                    
-                    response = await llm.ainvoke(messages)
-                    analysis = response.content
-                    
-                    logger.info("✓ Gemini analysis completed for image")
-                    
-                except Exception as e:
-                    logger.warning(f"Error sending image analysis to Gemini: {e}")
-                    analysis = result.analysis
+                    logger.info("✓ Image processing completed")
+                
+            except Exception as e:
+                logger.warning(f"Error in intelligent image processing: {e}")
+                # Fallback to original analysis
+                analysis = result.analysis
             
             return FileAnalysisResponse(
                 success=result.success,
-                report_type=result.report_type,
-                extracted_text=result.extracted_text,
+                report_type=report_type,
+                extracted_text=extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text,
                 analysis=analysis,
                 message=result.message
             )

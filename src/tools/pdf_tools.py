@@ -15,6 +15,7 @@ import pytesseract
 from PIL import Image
 from pydantic import BaseModel
 from langchain_google_genai import ChatGoogleGenerativeAI
+from ..llm.config import LLMConfig
 
 logger = logging.getLogger(__name__)
 
@@ -325,8 +326,8 @@ def analyze_pdf(
                 
                 llm = ChatGoogleGenerativeAI(
                     api_key=api_key,
-                    model="gemini-2.0-flash",
-                    temperature=0.3
+                    model=LLMConfig.GEMINI_MODEL,
+                    temperature=LLMConfig.TEMPERATURE
                 )
                 
                 analysis_prompt = f"""

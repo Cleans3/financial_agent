@@ -149,7 +149,7 @@ Bạn có thể chọn 1 trong 2 provider:
 # Google Gemini
 GOOGLE_API_KEY=your_api_key_here
 LLM_PROVIDER=gemini
-GEMINI_MODEL=gemini-2.0-flash
+LLM_MODEL=gemini-2.5-flash
 ```
 
 #### Option 2: Ollama (Local) 🖥️
@@ -405,7 +405,7 @@ Chỉnh sửa `.env`:
 ```env
 # Gemini
 LLM_PROVIDER=gemini
-GEMINI_MODEL=gemini-2.0-flash
+LLM_MODEL=gemini-2.5-flash
 GOOGLE_API_KEY=your_key_here
 
 # Ollama

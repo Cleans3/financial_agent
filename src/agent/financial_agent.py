@@ -222,7 +222,20 @@ class FinancialAgent:
             
             # Get final answer
             final_message = result["messages"][-1]
-            answer = final_message.content if hasattr(final_message, 'content') else str(final_message)
+            content = final_message.content if hasattr(final_message, 'content') else str(final_message)
+            
+            # Handle case where content is a list of content blocks
+            if isinstance(content, list):
+                # Extract text from content blocks
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get('type') == 'text':
+                        text_parts.append(block.get('text', ''))
+                    elif isinstance(block, str):
+                        text_parts.append(block)
+                answer = ''.join(text_parts)
+            else:
+                answer = str(content)
             
             logger.info(f"Answer generated: {answer[:100]}...")
             return answer

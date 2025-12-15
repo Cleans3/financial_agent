@@ -16,6 +16,7 @@ import pytesseract
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 from pydantic import BaseModel
+from ..llm.config import LLMConfig
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +161,8 @@ def analyze_financial_report(
         try:
             llm = ChatGoogleGenerativeAI(
                 api_key=api_key,
-                model="gemini-2.0-flash",
-                temperature=0.3
+                model=LLMConfig.GEMINI_MODEL,
+                temperature=LLMConfig.TEMPERATURE
             )
             
             # Tạo prompt phân tích
