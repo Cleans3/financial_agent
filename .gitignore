@@ -72,3 +72,9 @@ frontend/Thumbs.db
 
 # Tesseract Testing
 tesseract_test/
+
+# personal documents
+ps_doc/
+
+# personal tests
+ps_test/

@@ -1,0 +1,33 @@
+{
+  "0": {
+    "doc_id": "microsoft_overview",
+    "title": "Microsoft Corporation Overview",
+    "source": "financial_report.txt",
+    "user_id": "test_user",
+    "added_at": "2025-12-16T12:38:13.320692",
+    "text": "\n    Microsoft Corporation is a software and cloud computing company based in Redmond, Washington. Key business segments:\n    - Productivity (Office 365, Teams): $65 billion annually\n    - Cloud Services (Azure): $80 billion annually\n    - Gaming (Xbox, Game Pass): $20 billion annually\n    - LinkedIn and other business apps: $15 billion annually\n    \n    Microsoft's financial metrics:\n    - Annual revenue: $220 billion\n    - Stock price: $415\n    - Market cap: $3.0 trillion\n    - Operating margin: 45%\n    \n    Microsoft is a leader in enterprise software and cloud computing with strong growth prospects. ",
+    "chunk_id": "microsoft_overview_0",
+    "chunk_index": 0
+  },
+  "1": {
+    "doc_id": "small_file",
+    "text": "small file",
+    "source": "tmp44lfkimd.txt",
+    "title": "tmp44lfkimd",
+    "chunk_index": 0
+  },
+  "2": {
+    "doc_id": "c1bec585-81fd-4e06-9c63-38fb05fbddbb_hpg_2023_tech",
+    "text": "\nTECHNICAL ANALYSIS - HPG (Hoa Phat Group)\n\nPrice Analysis (Last 30 days):\n- Current Price: 32,500 VND\n- 52-week High: 45,000 VND\n- 52-week Low: 28,000 VND\n- Volume: 5.2M shares\n\nTechnical Indicators:\n- SMA 20: 34,200 VND\n- SMA 50: 36,100 VND\n- RSI (14): 42.3 (Neutral, below oversold)\n- MACD: Bearish crossover signal\n\nTrend Analysis:\nThe stock has been in a downtrend since the 45,000 VND peak. Current support level at 31,000 VND, resistance at 34,500 VND. Recommendation:\nWait for a clear breakout above 35,000 to enter long positions. Strong support should hold above 30,000. ",
+    "source": "tmpho3ihv47.txt",
+    "title": "HPG Technical Analysis",
+    "chunk_index": 0
+  },
+  "3": {
+    "doc_id": "c1bec585-81fd-4e06-9c63-38fb05fbddbb_hpg_2023_tech",
+    "text": "\nTECHNICAL ANALYSIS - HPG (Hoa Phat Group)\n\nPrice Analysis (Last 30 days):\n- Current Price: 32,500 VND\n- 52-week High: 45,000 VND\n- 52-week Low: 28,000 VND\n- Volume: 5.2M shares\n\nTechnical Indicators:\n- SMA 20: 34,200 VND\n- SMA 50: 36,100 VND\n- RSI (14): 42.3 (Neutral, below oversold)\n- MACD: Bearish crossover signal\n\nTrend Analysis:\nThe stock has been in a downtrend since the 45,000 VND peak. Current support level at 31,000 VND, resistance at 34,500 VND. Recommendation:\nWait for a clear breakout above 35,000 to enter long positions. Strong support should hold above 30,000. ",
+    "source": "tmpj860890h.txt",
+    "title": "HPG Technical Analysis",
+    "chunk_index": 1
+  }
+}

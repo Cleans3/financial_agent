@@ -199,22 +199,51 @@ class FinancialAgent:
         logger.info("LangGraph workflow created successfully!")
         return app
     
-    async def aquery(self, question: str) -> str:
+    async def aquery(self, question: str, user_id: str = None, session_id: str = None, conversation_history: list = None, rag_documents: list = None) -> str:
         """
         Async query - Xử lý câu hỏi của người dùng
         
         Args:
             question: Câu hỏi tiếng Việt
+            user_id: User ID (optional, for context)
+            session_id: Session ID (optional, for context)
+            conversation_history: List of previous messages (optional)
+                Each message: {"role": "user"|"assistant", "content": str}
+            rag_documents: List of RAG document chunks to include in context (optional)
+                Each doc: {"text": str, "title": str, "source": str, "similarity": float}
             
         Returns:
             Câu trả lời từ agent
         """
         try:
-            logger.info(f"Processing question: {question}")
+            logger.info(f"Processing question for user {user_id} in session {session_id}: {question}")
             
-            # Create initial state with user question
+            # Build message list with conversation history
+            messages = []
+            
+            # Add previous messages from conversation history if provided
+            if conversation_history:
+                for msg in conversation_history:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if role == "assistant":
+                        messages.append(AIMessage(content=content))
+                    else:
+                        messages.append(HumanMessage(content=content))
+            
+            # Add current question (with RAG context if available)
+            if rag_documents and len(rag_documents) > 0:
+                # Format RAG documents as context
+                rag_context = self._format_rag_context(rag_documents)
+                enhanced_question = f"{question}\n\n📚 Related Documents:\n{rag_context}"
+                messages.append(HumanMessage(content=enhanced_question))
+                logger.info(f"Enhanced question with {len(rag_documents)} RAG documents")
+            else:
+                messages.append(HumanMessage(content=question))
+            
+            # Create initial state with conversation context
             initial_state = {
-                "messages": [HumanMessage(content=question)]
+                "messages": messages
             }
             
             # Run graph
@@ -237,19 +266,147 @@ class FinancialAgent:
             else:
                 answer = str(content)
             
-            logger.info(f"Answer generated: {answer[:100]}...")
+            # Clean up JSON responses - if answer looks like JSON, convert to natural text
+            answer = self._clean_json_response(answer)
+            
+            logger.info(f"Answer generated for user {user_id}: {answer[:100]}...")
             return answer
             
         except Exception as e:
             logger.error(f"Error processing query: {e}")
             return f"Xin lỗi, đã có lỗi xảy ra: {str(e)}"
     
-    def query(self, question: str) -> str:
+    def _format_rag_context(self, documents: list) -> str:
+        """
+        Format RAG documents for inclusion in the question
+        
+        Args:
+            documents: List of document chunks
+            
+        Returns:
+            Formatted context string
+        """
+        context_parts = []
+        for i, doc in enumerate(documents, 1):
+            title = doc.get('title', 'Unknown')
+            text = doc.get('text', '')
+            similarity = doc.get('similarity', 0)
+            source = doc.get('source', '')
+            
+            # Limit text length
+            text_preview = text[:300] + "..." if len(text) > 300 else text
+            
+            context_parts.append(
+                f"{i}. [{title}] (Relevance: {similarity:.1%})\n"
+                f"   Source: {source}\n"
+                f"   {text_preview}\n"
+            )
+        
+        return "\n".join(context_parts)
+    
+    def _clean_json_response(self, answer: str) -> str:
+        """
+        Detect and clean JSON-formatted responses or explanations of JSON structure.
+        If answer is explaining JSON instead of showing a table, try to extract and 
+        reformat the data.
+        
+        Args:
+            answer: Raw answer from LLM
+            
+        Returns:
+            Cleaned answer (natural language or original if not JSON)
+        """
+        import json
+        import re
+        
+        answer = answer.strip()
+        
+        # Check if answer looks like it's explaining JSON structure or data format
+        json_explanation_keywords = [
+            "đối tượng json",
+            "cấu trúc json", 
+            "json chứa",
+            "mảng dữ liệu",
+            "từng phần tử",
+            "bản ghi dữ liệu",
+            "thử viện json",
+            "json parsing",
+            "json.loads",
+            "để sử dụng dữ liệu",
+            "duyệt qua mảng",
+            "dữ liệu này bao gồm",
+            "dữ liệu bao gồm",
+            "có thể được sử dụng",
+            "để phân tích",
+            "dữ liệu này chứa",
+            "dữ liệu này có",
+            "mảng chứa",
+            "bao gồm các khóa",
+            "khóa như",
+        ]
+        
+        answer_lower = answer.lower()
+        is_json_explanation = any(keyword in answer_lower for keyword in json_explanation_keywords)
+        
+        if is_json_explanation:
+            logger.warning(f"JSON explanation detected, attempting to extract embedded JSON: {answer[:100]}")
+            
+            # Try to find JSON embedded in the explanation text
+            json_pattern = r'\{[^{}]*\}|\[[^\[\]]*\]'
+            json_matches = re.findall(json_pattern, answer)
+            
+            if json_matches:
+                for json_str in json_matches:
+                    try:
+                        # Try to parse each match
+                        data = json.loads(json_str)
+                        logger.info(f"Extracted JSON from explanation: {str(data)[:100]}")
+                        
+                        # If we found data, still return the original answer
+                        # The system prompt should have taught it better
+                        # But if this keeps happening, we could try conversion here
+                        break
+                    except json.JSONDecodeError:
+                        continue
+            
+            # For now, just log and return original answer
+            # The system prompt is supposed to prevent this
+            logger.warning(f"Returning original answer despite JSON explanation pattern")
+            return answer
+        
+        # Check if answer looks like JSON (starts with { or [)
+        if answer.startswith('{') or answer.startswith('['):
+            try:
+                parsed = json.loads(answer)
+                
+                # If it's a simple object like {"name": "hello"...}, extract values
+                if isinstance(parsed, dict):
+                    # Try to extract a meaningful message
+                    for key in ['content', 'message', 'text', 'answer', 'response']:
+                        if key in parsed and isinstance(parsed[key], str):
+                            return parsed[key]
+                    
+                    # If no standard key, return a default message
+                    logger.warning(f"JSON response detected and cleaned: {answer[:100]}")
+                    return "Tôi là trợ lý tư vấn tài chính. Bạn có câu hỏi gì về chứng khoán Việt Nam không?"
+                
+                return answer
+            except json.JSONDecodeError:
+                # Not valid JSON, return as-is
+                return answer
+        
+        return answer
+    
+    def query(self, question: str, user_id: str = None, session_id: str = None, conversation_history: list = None, rag_documents: list = None) -> str:
         """
         Sync query - Wrapper for async query
         
         Args:
             question: Câu hỏi tiếng Việt
+            user_id: User ID (optional, for context)
+            session_id: Session ID (optional, for context)
+            conversation_history: List of previous messages (optional)
+            rag_documents: List of RAG document chunks (optional)
             
         Returns:
             Câu trả lời từ agent
@@ -265,7 +422,9 @@ class FinancialAgent:
                 asyncio.set_event_loop(loop)
             
             # Run async query
-            return loop.run_until_complete(self.aquery(question))
+            return loop.run_until_complete(
+                self.aquery(question, user_id=user_id, session_id=session_id, conversation_history=conversation_history, rag_documents=rag_documents)
+            )
             
         except Exception as e:
             logger.error(f"Error in sync query: {e}")

@@ -46,3 +46,22 @@ opencv-python>=4.8.0
 pdfplumber>=0.10.0
 pdf2image>=1.16.0
 
+# Database
+psycopg2-binary>=2.9.0
+sqlalchemy>=2.0.0
+alembic>=1.13.0
+
+# Authentication & Security
+python-jose[cryptography]>=3.3.0
+passlib[argon2]>=1.7.4
+python-multipart>=0.0.6
+
+# Vector DB & Search
+qdrant-client>=1.16.0
+faiss-cpu>=1.7.4
+sentence-transformers>=2.2.0
+
+# Caching & Utilities
+pydantic-settings>=2.1.0
+typing-extensions>=4.8.0
+

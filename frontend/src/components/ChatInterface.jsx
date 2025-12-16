@@ -1,9 +1,11 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Loader2, User, Bot, Plus, X, File, Image, FileText, FileSpreadsheet, FileArchive } from "lucide-react";
+import { Send, Loader2, User, Bot, Plus, X, File, Image, FileText, FileSpreadsheet, FileArchive, BookOpen } from "lucide-react";
 import axios from "axios";
 import MessageBubble from "./MessageBubble";
+import DocumentPanel from "./DocumentPanel";
+import { conversationService } from "../services/conversationService";
 
-const ChatInterface = () => {
+const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh }) => {
   const [messages, setMessages] = useState([
     {
       role: "assistant",
@@ -14,11 +16,68 @@ const ChatInterface = () => {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState([]);
-  const [fileContext, setFileContext] = useState(null); // Lưu context file để chat tiếp
-  const [isDragOver, setIsDragOver] = useState(false); // Drag-over state
+  const [fileContext, setFileContext] = useState(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [activeConversationId, setActiveConversationId] = useState(null);
+  const [pendingUserMessage, setPendingUserMessage] = useState(null);
+  const [useRAG, setUseRAG] = useState(true);
+  const [showDocumentPanel, setShowDocumentPanel] = useState(false);
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const textareaRef = useRef(null);
+
+  // Reset messages when conversation changes
+  useEffect(() => {
+    const loadConversation = async () => {
+      // Don't switch conversations if agent is thinking in another conversation
+      if (isLoading && activeConversationId && activeConversationId !== conversationId) {
+        return; // Stay in the active conversation
+      }
+      
+      if (conversationId === null) {
+        setMessages([
+          {
+            role: "assistant",
+            content:
+              "Xin chào! Tôi là Financial Agent, trợ lý AI chuyên về thị trường chứng khoán Việt Nam. Tôi có thể giúp bạn:\n\n• Tra cứu thông tin công ty\n• Xem dữ liệu giá lịch sử (OHLCV)\n• Phân tích cổ đông và ban lãnh đạo\n• Tính toán chỉ số kỹ thuật (SMA, RSI)\n• Xem sự kiện công ty\n\nHãy thử hỏi tôi về bất kỳ mã chứng khoán nào!",
+          },
+        ]);
+        setInput("");
+        setUploadedFiles([]);
+        setFileContext(null);
+        setPendingUserMessage(null);
+      } else {
+        // Load conversation history from API
+        const conversation = await conversationService.getConversation(conversationId);
+        let loadedMessages = [
+          {
+            role: "assistant",
+            content:
+              "Xin chào! Tôi là Financial Agent, trợ lý AI chuyên về thị trường chứng khoán Việt Nam. Tôi có thể giúp bạn:\n\n• Tra cứu thông tin công ty\n• Xem dữ liệu giá lịch sử (OHLCV)\n• Phân tích cổ đông và ban lãnh đạo\n• Tính toán chỉ số kỹ thuật (SMA, RSI)\n• Xem sự kiện công ty\n\nHãy thử hỏi tôi về bất kỳ mã chứng khoán nào!",
+          },
+        ];
+
+        if (conversation && conversation.messages && conversation.messages.length > 0) {
+          loadedMessages = conversation.messages.map(msg => ({
+            role: msg.role,
+            content: msg.content
+          }));
+        }
+
+        // If there's a pending user message, add it to the loaded messages
+        if (pendingUserMessage) {
+          loadedMessages.push({
+            role: "user",
+            content: pendingUserMessage
+          });
+          setPendingUserMessage(null);
+        }
+
+        setMessages(loadedMessages);
+      }
+    };
+    loadConversation();
+  }, [conversationId]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -27,6 +86,14 @@ const ChatInterface = () => {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Save messages to conversation storage
+  useEffect(() => {
+    if (conversationId && messages.length > 0) {
+      conversationService.saveMessages(conversationId, messages);
+      // Don't refresh sidebar on every message save - only on conversation creation/deletion
+    }
+  }, [messages, conversationId]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -37,7 +104,30 @@ const ChatInterface = () => {
     const filesToProcess = [...uploadedFiles];
     setUploadedFiles([]);
 
-    // Add user message
+    // Create a new conversation if none exists
+    let currentConvId = conversationId;
+    if (!currentConvId) {
+      try {
+        const newConv = await conversationService.createConversation(userMessage || "Phân tích file");
+        currentConvId = newConv.id;
+        // Set pending message before switching conversation
+        setPendingUserMessage(userMessage || "Phân tích file");
+        onConversationChange?.(currentConvId);
+        return; // Exit early - the conversation change will trigger the message to be added via useEffect
+      } catch (error) {
+        console.error('Error creating conversation:', error);
+        setMessages((prev) => [...prev, { 
+          role: "assistant", 
+          content: `Lỗi: Không thể tạo cuộc trò chuyện. ${error.message}` 
+        }]);
+        return;
+      }
+    }
+
+    // Mark this conversation as the active one (agent is thinking here)
+    setActiveConversationId(currentConvId);
+
+    // Add user message (only for existing conversations)
     setMessages((prev) => [...prev, { role: "user", content: userMessage || "Phân tích file" }]);
     setIsLoading(true);
 
@@ -122,6 +212,17 @@ const ChatInterface = () => {
       ]);
     } finally {
       setIsLoading(false);
+      setActiveConversationId(null); // Clear active conversation when done thinking
+      // Only refresh sidebar on conversation creation or cleanup
+      // Don't refresh on every message to avoid excessive API calls
+      try {
+        const deletedCount = await conversationService.deleteEmptyConversations();
+        if (deletedCount > 0) {
+          onSidebarRefresh?.();
+        }
+      } catch (error) {
+        console.warn('Error deleting empty conversations:', error);
+      }
     }
   };
 
@@ -407,6 +508,19 @@ const ChatInterface = () => {
 
           {/* Input Container - Flex with no wrap */}
           <div className="flex items-stretch gap-3">
+            {/* Documents Button */}
+            <button
+              type="button"
+              onClick={() => setShowDocumentPanel(true)}
+              className="bg-purple-600 hover:bg-purple-700 text-white rounded-full
+                       transition-all duration-200 transform hover:scale-110 active:scale-95
+                       flex-shrink-0 flex items-center justify-center
+                       w-12 h-12 min-w-12 min-h-12"
+              title="Manage documents and RAG search"
+            >
+              <BookOpen className="w-6 h-6" />
+            </button>
+
             {/* File Upload Button - Circle */}
             <button
               type="button"
@@ -488,6 +602,15 @@ const ChatInterface = () => {
             Nhấn Enter để gửi, Shift+Enter để xuống dòng • Ctrl+V để paste file
           </p>
         </form>
+
+        {/* Document Panel Modal */}
+        <DocumentPanel
+          sessionId={conversationId}
+          isOpen={showDocumentPanel}
+          onClose={() => setShowDocumentPanel(false)}
+          useRAG={useRAG}
+          onToggleRAG={() => setUseRAG(!useRAG)}
+        />
       </div>
     </div>
   );
