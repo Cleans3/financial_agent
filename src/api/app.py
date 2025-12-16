@@ -45,9 +45,20 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+# Add security headers middleware
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+    return response
 
 @app.on_event("startup")
 async def startup():
@@ -91,7 +102,9 @@ class LoginRequest(BaseModel):
 
 class LoginResponse(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
+    user_id: str
 
 class UserInfoResponse(BaseModel):
     id: str
@@ -100,14 +113,169 @@ class UserInfoResponse(BaseModel):
     is_admin: bool
     is_active: bool
 
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50, description="Username (3-50 characters)")
+    email: str = Field(..., description="Valid email address")
+    password: str = Field(..., min_length=8, description="Password (min 8 chars, 1 uppercase, 1 lowercase, 1 digit, 1 special char)")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "username": "john_doe",
+                "email": "john@example.com",
+                "password": "SecurePass123!"
+            }
+        }
+
+class RegisterResponse(BaseModel):
+    user_id: str
+    username: str
+    email: str
+    message: str
+
+def validate_password_complexity(password: str) -> bool:
+    """Validate password meets complexity requirements"""
+    import re
+    if len(password) < 8:
+        return False
+    # At least 1 uppercase, 1 lowercase, 1 digit, 1 special char
+    if not re.search(r'[A-Z]', password):
+        return False
+    if not re.search(r'[a-z]', password):
+        return False
+    if not re.search(r'\d', password):
+        return False
+    if not re.search(r'[!@#$%^&*()_+\-=\[\]{};:\'",.<>?/\\|`~]', password):
+        return False
+    return True
+
 @app.post("/api/auth/login", response_model=LoginResponse)
 async def login(request: LoginRequest, db: Session = Depends(get_db)):
+    from ..services.rate_limiter import rate_limit_login
+    from starlette.requests import Request
+    
+    # Rate limit by username
+    allowed, info = rate_limit_login(request.username)
+    if not allowed:
+        raise HTTPException(
+            status_code=429, 
+            detail="Too many login attempts. Please try again later.",
+            headers={"Retry-After": str(info["retry_after"])}
+        )
+    
     user = db.query(User).filter(User.username == request.username).first()
     if not user or not verify_password(request.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="User account is disabled")
+    
+    from ..core.security import create_refresh_token
     access_token = create_access_token(data={"sub": user.id, "is_admin": user.is_admin})
-    return LoginResponse(access_token=access_token)
+    refresh_token = create_refresh_token(data={"sub": user.id, "is_admin": user.is_admin})
+    
+    return LoginResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        user_id=str(user.id)
+    )
+
+@app.post("/api/auth/register", response_model=RegisterResponse, status_code=201)
+async def register(request: RegisterRequest, db: Session = Depends(get_db)):
+    """Register a new user account"""
+    import re
+    
+    # Validate email format
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(email_pattern, request.email):
+        raise HTTPException(status_code=422, detail="Invalid email format")
+    
+    # Validate password complexity
+    if not validate_password_complexity(request.password):
+        raise HTTPException(
+            status_code=422, 
+            detail="Password must contain at least 8 characters, 1 uppercase letter, 1 lowercase letter, 1 digit, and 1 special character"
+        )
+    
+    # Check for duplicate username (case-insensitive)
+    existing_user = db.query(User).filter(
+        User.username.ilike(request.username)
+    ).first()
+    if existing_user:
+        raise HTTPException(status_code=422, detail="Username already exists")
+    
+    # Check for duplicate email (case-insensitive)
+    existing_email = db.query(User).filter(
+        User.email.ilike(request.email)
+    ).first()
+    if existing_email:
+        raise HTTPException(status_code=422, detail="Email already registered")
+    
+    # Create new user
+    new_user = User(
+        username=request.username,
+        email=request.email,
+        hashed_password=hash_password(request.password),
+        is_admin=False,
+        is_active=True
+    )
+    
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    # Log the registration in audit log if available
+    from ..services.admin_service import AdminService
+    try:
+        AdminService.log_action(db, new_user.id, "USER_REGISTERED", "USER", str(new_user.id), {"email": request.email})
+    except Exception as e:
+        logger.warning(f"Failed to log registration: {e}")
+    
+    return RegisterResponse(
+        user_id=str(new_user.id),
+        username=new_user.username,
+        email=new_user.email,
+        message="User registered successfully"
+    )
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+class RefreshTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+@app.post("/api/auth/refresh", response_model=RefreshTokenResponse)
+async def refresh_token(request: RefreshTokenRequest, db: Session = Depends(get_db)):
+    """Refresh access token using refresh token"""
+    from ..core.security import decode_token, create_access_token, create_refresh_token
+    
+    try:
+        payload = decode_token(request.refresh_token)
+        
+        # Verify this is actually a refresh token
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        # Get user from database to verify they still exist and are active
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user or not user.is_active:
+            raise HTTPException(status_code=401, detail="User not found or inactive")
+        
+        # Create new access token
+        new_access_token = create_access_token(data={"sub": user.id, "is_admin": user.is_admin})
+        
+        return RefreshTokenResponse(access_token=new_access_token)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Token refresh error: {e}")
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
 
 @app.get("/api/auth/me", response_model=UserInfoResponse)
 async def get_current_user_info(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -123,6 +291,72 @@ async def get_current_user_info(current_user: dict = Depends(get_current_user), 
         email=user.email,
         is_admin=user.is_admin,
         is_active=user.is_active
+    )
+
+# ==================== Health Check Endpoints ====================
+
+class HealthResponse(BaseModel):
+    status: str
+    database: str
+    rag_service: str
+    llm_service: str
+    timestamp: str
+
+@app.get("/health", response_model=HealthResponse)
+@app.get("/api/health", response_model=HealthResponse)
+async def health_check(db: Session = Depends(get_db)):
+    """
+    Health check endpoint for monitoring
+    Checks database connectivity, RAG service, and LLM service
+    """
+    from datetime import datetime
+    
+    health_status = {
+        "database": "unknown",
+        "rag_service": "unknown",
+        "llm_service": "unknown"
+    }
+    
+    # Check database connectivity
+    try:
+        db.execute("SELECT 1")
+        health_status["database"] = "healthy"
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+        health_status["database"] = "unhealthy"
+    
+    # Check RAG service
+    try:
+        from ..services.rag_service import get_rag_service
+        rag_service = get_rag_service()
+        if rag_service and hasattr(rag_service, 'index'):
+            health_status["rag_service"] = "healthy"
+        else:
+            health_status["rag_service"] = "unavailable"
+    except Exception as e:
+        logger.warning(f"RAG service health check failed: {e}")
+        health_status["rag_service"] = "unavailable"
+    
+    # Check LLM service
+    try:
+        agent = get_agent()
+        if agent:
+            health_status["llm_service"] = "healthy"
+        else:
+            health_status["llm_service"] = "unavailable"
+    except Exception as e:
+        logger.warning(f"LLM service health check failed: {e}")
+        health_status["llm_service"] = "unavailable"
+    
+    # Overall status
+    overall_status = "healthy" if health_status["database"] == "healthy" else "degraded"
+    
+    return HealthResponse(
+        status=overall_status,
+        database=health_status["database"],
+        rag_service=health_status["rag_service"],
+        llm_service=health_status["llm_service"],
+        timestamp=datetime.utcnow().isoformat()
     )
 
 # ==================== Chat Endpoints ====================
@@ -290,9 +524,26 @@ async def chat(
             for msg in history
         ]
         
-        # Handle RAG document retrieval if enabled
-        rag_documents = None
+        # Use RAG router to decide if documents are needed (agentic routing)
+        should_use_rag = request.use_rag  # Default to user preference
+        routing_decision = None
+        
         if request.use_rag:
+            try:
+                from ..services.rag_router import get_rag_router
+                router = get_rag_router(agent_instance)
+                should_use_rag, routing_decision = await router.should_use_rag(
+                    request.question,
+                    conversation_history
+                )
+                logger.info(f"RAG router decision: use_rag={should_use_rag}, type={routing_decision.get('query_type')}, confidence={routing_decision.get('confidence')}")
+            except Exception as router_error:
+                logger.warning(f"RAG router error (defaulting to enabled): {router_error}")
+                should_use_rag = True
+        
+        # Handle RAG document retrieval if router decision is YES
+        rag_documents = None
+        if should_use_rag:
             try:
                 from src.services.rag_service import get_rag_service
                 rag_service = get_rag_service()

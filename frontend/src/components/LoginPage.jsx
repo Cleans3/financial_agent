@@ -1,18 +1,104 @@
 import React, { useState } from 'react'
 import axios from 'axios'
-import { Lock, Mail, Loader } from 'lucide-react'
+import { Lock, Mail, Loader, AlertCircle, CheckCircle } from 'lucide-react'
 import { COLORS, STYLES } from '../theme/colors'
 
 const LoginPage = ({ onLoginSuccess }) => {
+  const [isRegistering, setIsRegistering] = useState(false)
   const [username, setUsername] = useState('')
+  const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [success, setSuccess] = useState(null)
+  const [passwordStrength, setPasswordStrength] = useState(0)
 
-  const handleSubmit = async (e) => {
+  // Calculate password strength
+  const calculatePasswordStrength = (pwd) => {
+    let strength = 0
+    if (pwd.length >= 8) strength += 20
+    if (/[A-Z]/.test(pwd)) strength += 20
+    if (/[a-z]/.test(pwd)) strength += 20
+    if (/\d/.test(pwd)) strength += 20
+    if (/[!@#$%^&*()_+\-=\[\]{};:'".<>?/\\|`~]/.test(pwd)) strength += 20
+    setPasswordStrength(strength)
+    return strength
+  }
+
+  const handlePasswordChange = (e) => {
+    const pwd = e.target.value
+    setPassword(pwd)
+    calculatePasswordStrength(pwd)
+  }
+
+  const getPasswordStrengthText = () => {
+    if (passwordStrength === 0) return ''
+    if (passwordStrength < 40) return 'Weak'
+    if (passwordStrength < 80) return 'Fair'
+    return 'Strong'
+  }
+
+  const getPasswordStrengthColor = () => {
+    if (passwordStrength === 0) return 'bg-slate-600'
+    if (passwordStrength < 40) return 'bg-red-500'
+    if (passwordStrength < 80) return 'bg-yellow-500'
+    return 'bg-green-500'
+  }
+
+  const handleRegister = async (e) => {
+    e.preventDefault()
+    setError(null)
+    setSuccess(null)
+    setLoading(true)
+
+    try {
+      // Validate inputs
+      if (password !== confirmPassword) {
+        setError('Passwords do not match')
+        setLoading(false)
+        return
+      }
+
+      if (passwordStrength < 80) {
+        setError('Password is not strong enough. Please use uppercase, lowercase, numbers, and special characters.')
+        setLoading(false)
+        return
+      }
+
+      const response = await axios.post('/api/auth/register', {
+        username,
+        email,
+        password
+      })
+
+      if (response.data.user_id) {
+        setSuccess('Registration successful! Please log in with your new account.')
+        setUsername('')
+        setEmail('')
+        setPassword('')
+        setConfirmPassword('')
+        setPasswordStrength(0)
+        
+        // Switch to login tab after 2 seconds
+        setTimeout(() => {
+          setIsRegistering(false)
+          setSuccess(null)
+        }, 2000)
+      }
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Registration failed. Please try again.')
+      console.error('Registration error:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleLogin = async (e) => {
     e.preventDefault()
     setLoading(true)
     setError(null)
+    setSuccess(null)
 
     try {
       const response = await axios.post('/api/auth/login', {
@@ -22,6 +108,7 @@ const LoginPage = ({ onLoginSuccess }) => {
 
       if (response.data.access_token) {
         localStorage.setItem('token', response.data.access_token)
+        localStorage.setItem('refreshToken', response.data.refresh_token)
         axios.defaults.headers.common['Authorization'] = `Bearer ${response.data.access_token}`
         
         // Fetch full user info including is_admin flag
@@ -36,7 +123,7 @@ const LoginPage = ({ onLoginSuccess }) => {
         } catch (infoErr) {
           console.error('Error fetching user info:', infoErr.message, infoErr.response?.data)
           // Fallback to basic user data with default is_admin
-          const userData = { username, email: username, is_admin: false, id: 'temp' }
+          const userData = { username, email: username, is_admin: false, id: response.data.user_id }
           console.log('Using fallback user data:', userData)
           localStorage.setItem('user', JSON.stringify(userData))
           onLoginSuccess(userData)
@@ -69,84 +156,229 @@ const LoginPage = ({ onLoginSuccess }) => {
             <p className="text-slate-400">AI-Powered Stock Market Assistant</p>
           </div>
 
+          {/* Tabs */}
+          <div className="flex gap-2 mb-8">
+            <button
+              onClick={() => setIsRegistering(false)}
+              className={`flex-1 py-2 px-4 rounded-lg font-medium transition-all ${
+                !isRegistering
+                  ? 'bg-sky-500 text-white'
+                  : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+              }`}
+            >
+              Log In
+            </button>
+            <button
+              onClick={() => setIsRegistering(true)}
+              className={`flex-1 py-2 px-4 rounded-lg font-medium transition-all ${
+                isRegistering
+                  ? 'bg-sky-500 text-white'
+                  : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+              }`}
+            >
+              Sign Up
+            </button>
+          </div>
+
           {/* Error Alert */}
           {error && (
-            <div className="mb-6 p-4 bg-red-500/10 border border-red-500/50 rounded-lg">
+            <div className="mb-6 p-4 bg-red-500/10 border border-red-500/50 rounded-lg flex gap-3">
+              <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
               <p className="text-red-400 text-sm">{error}</p>
             </div>
           )}
 
+          {/* Success Alert */}
+          {success && (
+            <div className="mb-6 p-4 bg-green-500/10 border border-green-500/50 rounded-lg flex gap-3">
+              <CheckCircle className="w-5 h-5 text-green-400 flex-shrink-0 mt-0.5" />
+              <p className="text-green-400 text-sm">{success}</p>
+            </div>
+          )}
+
           {/* Login Form */}
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Username Field */}
-            <div>
-              <label className="block text-sm font-medium text-slate-300 mb-2">
-                Username
-              </label>
-              <div className="relative">
-                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+          {!isRegistering ? (
+            <form onSubmit={handleLogin} className="space-y-4">
+              {/* Username Field */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Username
+                </label>
+                <div className="relative">
+                  <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+                  <input
+                    type="text"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="Enter your username"
+                    className={`${STYLES.input} pl-10`}
+                    required
+                    disabled={loading}
+                  />
+                </div>
+              </div>
+
+              {/* Password Field */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Password
+                </label>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className={`${STYLES.input} pl-10`}
+                    required
+                    disabled={loading}
+                  />
+                </div>
+              </div>
+
+              {/* Submit Button */}
+              <button
+                type="submit"
+                disabled={loading}
+                className={`${STYLES.button.primary} w-full mt-6 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed`}
+              >
+                {loading ? (
+                  <>
+                    <Loader className="w-4 h-4 animate-spin" />
+                    Logging in...
+                  </>
+                ) : (
+                  'Log In'
+                )}
+              </button>
+            </form>
+          ) : (
+            /* Registration Form */
+            <form onSubmit={handleRegister} className="space-y-4">
+              {/* Username Field */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Username
+                </label>
                 <input
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="admin"
-                  className={`${STYLES.input} pl-10`}
+                  placeholder="Choose a username (3-50 chars)"
+                  className={STYLES.input}
+                  required
+                  minLength={3}
+                  maxLength={50}
+                  disabled={loading}
+                />
+              </div>
+
+              {/* Email Field */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Email
+                </label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="Enter your email"
+                  className={STYLES.input}
                   required
                   disabled={loading}
                 />
               </div>
-            </div>
 
-            {/* Password Field */}
-            <div>
-              <label className="block text-sm font-medium text-slate-300 mb-2">
-                Password
-              </label>
-              <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+              {/* Password Field */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Password
+                </label>
                 <input
                   type="password"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className={`${STYLES.input} pl-10`}
+                  onChange={handlePasswordChange}
+                  placeholder="Min 8 chars: uppercase, lowercase, number, special char"
+                  className={STYLES.input}
                   required
                   disabled={loading}
                 />
+                {password && (
+                  <div className="mt-2 space-y-2">
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="text-slate-400">Strength:</span>
+                      <span className={`font-semibold ${
+                        passwordStrength < 40 ? 'text-red-400' :
+                        passwordStrength < 80 ? 'text-yellow-400' :
+                        'text-green-400'
+                      }`}>
+                        {getPasswordStrengthText()}
+                      </span>
+                    </div>
+                    <div className="w-full bg-slate-700 rounded-full h-2">
+                      <div
+                        className={`h-2 rounded-full transition-all ${getPasswordStrengthColor()}`}
+                        style={{ width: `${passwordStrength}%` }}
+                      ></div>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
 
-            {/* Submit Button */}
-            <button
-              type="submit"
-              disabled={loading}
-              className={`${STYLES.button.primary} w-full mt-6 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed`}
-            >
-              {loading ? (
-                <>
-                  <Loader className="w-4 h-4 animate-spin" />
-                  Logging in...
-                </>
-              ) : (
-                'Log In'
-              )}
-            </button>
-          </form>
+              {/* Confirm Password Field */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Confirm Password
+                </label>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Confirm your password"
+                  className={STYLES.input}
+                  required
+                  disabled={loading}
+                />
+                {confirmPassword && password !== confirmPassword && (
+                  <p className="text-red-400 text-xs mt-2">Passwords do not match</p>
+                )}
+              </div>
+
+              {/* Submit Button */}
+              <button
+                type="submit"
+                disabled={loading || password !== confirmPassword || passwordStrength < 80}
+                className={`${STYLES.button.primary} w-full mt-6 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed`}
+              >
+                {loading ? (
+                  <>
+                    <Loader className="w-4 h-4 animate-spin" />
+                    Creating account...
+                  </>
+                ) : (
+                  'Sign Up'
+                )}
+              </button>
+            </form>
+          )}
 
           {/* Demo Credentials */}
-          <div className="mt-8 pt-8 border-t border-slate-700">
-            <p className="text-slate-400 text-sm text-center mb-4">Demo Credentials:</p>
-            <div className="bg-slate-700/50 p-4 rounded-lg space-y-2 border border-slate-600">
-              <div>
-                <p className="text-xs text-slate-500 uppercase tracking-wider">Username</p>
-                <p className="text-slate-300 font-mono">admin</p>
-              </div>
-              <div>
-                <p className="text-xs text-slate-500 uppercase tracking-wider">Password</p>
-                <p className="text-slate-300 font-mono">admin123</p>
+          {!isRegistering && (
+            <div className="mt-8 pt-8 border-t border-slate-700">
+              <p className="text-slate-400 text-sm text-center mb-4">Demo Credentials:</p>
+              <div className="bg-slate-700/50 p-4 rounded-lg space-y-2 border border-slate-600">
+                <div>
+                  <p className="text-xs text-slate-500 uppercase tracking-wider">Username</p>
+                  <p className="text-slate-300 font-mono">admin</p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500 uppercase tracking-wider">Password</p>
+                  <p className="text-slate-300 font-mono">admin123</p>
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
           {/* Features List */}
           <div className="mt-8 pt-8 border-t border-slate-700">
