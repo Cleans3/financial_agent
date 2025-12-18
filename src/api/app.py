@@ -115,8 +115,8 @@ class UserInfoResponse(BaseModel):
 
 class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50, description="Username (3-50 characters)")
-    email: str = Field(..., description="Valid email address")
-    password: str = Field(..., min_length=8, description="Password (min 8 chars, 1 uppercase, 1 lowercase, 1 digit, 1 special char)")
+    email: Optional[str] = Field(None, description="Valid email address (optional)")
+    password: str = Field(..., min_length=6, description="Password (min 6 chars, 1 uppercase, 1 lowercase, 1 digit)")
     
     class Config:
         json_schema_extra = {
@@ -134,18 +134,16 @@ class RegisterResponse(BaseModel):
     message: str
 
 def validate_password_complexity(password: str) -> bool:
-    """Validate password meets complexity requirements"""
+    """Validate password meets complexity requirements (6+ chars, uppercase, lowercase, digit)"""
     import re
-    if len(password) < 8:
+    if len(password) < 6:
         return False
-    # At least 1 uppercase, 1 lowercase, 1 digit, 1 special char
+    # At least 1 uppercase, 1 lowercase, 1 digit
     if not re.search(r'[A-Z]', password):
         return False
     if not re.search(r'[a-z]', password):
         return False
     if not re.search(r'\d', password):
-        return False
-    if not re.search(r'[!@#$%^&*()_+\-=\[\]{};:\'",.<>?/\\|`~]', password):
         return False
     return True
 
@@ -185,16 +183,17 @@ async def register(request: RegisterRequest, db: Session = Depends(get_db)):
     """Register a new user account"""
     import re
     
-    # Validate email format
-    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    if not re.match(email_pattern, request.email):
-        raise HTTPException(status_code=422, detail="Invalid email format")
+    # Validate email format if provided
+    if request.email:
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_pattern, request.email):
+            raise HTTPException(status_code=422, detail="Invalid email format")
     
     # Validate password complexity
     if not validate_password_complexity(request.password):
         raise HTTPException(
             status_code=422, 
-            detail="Password must contain at least 8 characters, 1 uppercase letter, 1 lowercase letter, 1 digit, and 1 special character"
+            detail="Password must contain at least 6 characters, 1 uppercase letter, 1 lowercase letter, and 1 digit"
         )
     
     # Check for duplicate username (case-insensitive)
@@ -204,12 +203,13 @@ async def register(request: RegisterRequest, db: Session = Depends(get_db)):
     if existing_user:
         raise HTTPException(status_code=422, detail="Username already exists")
     
-    # Check for duplicate email (case-insensitive)
-    existing_email = db.query(User).filter(
-        User.email.ilike(request.email)
-    ).first()
-    if existing_email:
-        raise HTTPException(status_code=422, detail="Email already registered")
+    # Check for duplicate email (case-insensitive) if provided
+    if request.email:
+        existing_email = db.query(User).filter(
+            User.email.ilike(request.email)
+        ).first()
+        if existing_email:
+            raise HTTPException(status_code=422, detail="Email already registered")
     
     # Create new user
     new_user = User(

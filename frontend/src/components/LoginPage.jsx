@@ -17,11 +17,10 @@ const LoginPage = ({ onLoginSuccess }) => {
   // Calculate password strength
   const calculatePasswordStrength = (pwd) => {
     let strength = 0
-    if (pwd.length >= 8) strength += 20
-    if (/[A-Z]/.test(pwd)) strength += 20
-    if (/[a-z]/.test(pwd)) strength += 20
-    if (/\d/.test(pwd)) strength += 20
-    if (/[!@#$%^&*()_+\-=\[\]{};:'".<>?/\\|`~]/.test(pwd)) strength += 20
+    if (pwd.length >= 6) strength += 25
+    if (/[A-Z]/.test(pwd)) strength += 25
+    if (/[a-z]/.test(pwd)) strength += 25
+    if (/\d/.test(pwd)) strength += 25
     setPasswordStrength(strength)
     return strength
   }
@@ -60,8 +59,8 @@ const LoginPage = ({ onLoginSuccess }) => {
         return
       }
 
-      if (passwordStrength < 80) {
-        setError('Password is not strong enough. Please use uppercase, lowercase, numbers, and special characters.')
+      if (passwordStrength < 60) {
+        setError('Password is not strong enough. Please use uppercase, lowercase, and either numbers or special characters.')
         setLoading(false)
         return
       }
@@ -283,9 +282,8 @@ const LoginPage = ({ onLoginSuccess }) => {
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="Enter your email"
+                  placeholder="Enter your email (optional)"
                   className={STYLES.input}
-                  required
                   disabled={loading}
                 />
               </div>
@@ -299,7 +297,7 @@ const LoginPage = ({ onLoginSuccess }) => {
                   type="password"
                   value={password}
                   onChange={handlePasswordChange}
-                  placeholder="Min 8 chars: uppercase, lowercase, number, special char"
+                  placeholder="Min 6 chars: uppercase, lowercase, and number"
                   className={STYLES.input}
                   required
                   disabled={loading}
@@ -313,7 +311,7 @@ const LoginPage = ({ onLoginSuccess }) => {
                         passwordStrength < 80 ? 'text-yellow-400' :
                         'text-green-400'
                       }`}>
-                        {getPasswordStrengthText()}
+                        {getPasswordStrengthText()} ({passwordStrength}%)
                       </span>
                     </div>
                     <div className="w-full bg-slate-700 rounded-full h-2">
@@ -322,6 +320,25 @@ const LoginPage = ({ onLoginSuccess }) => {
                         style={{ width: `${passwordStrength}%` }}
                       ></div>
                     </div>
+                    {passwordStrength < 80 && (
+                      <div className="text-xs text-slate-400 space-y-1 mt-2">
+                        <p>To enable Sign Up button, your password needs:</p>
+                        <ul className="list-disc list-inside ml-1">
+                          <li className={/[A-Z]/.test(password) ? 'text-green-400' : 'text-red-400'}>
+                            {/[A-Z]/.test(password) ? '✓' : '✗'} One uppercase letter (A-Z)
+                          </li>
+                          <li className={/[a-z]/.test(password) ? 'text-green-400' : 'text-red-400'}>
+                            {/[a-z]/.test(password) ? '✓' : '✗'} One lowercase letter (a-z)
+                          </li>
+                          <li className={password.length >= 6 ? 'text-green-400' : 'text-red-400'}>
+                            {password.length >= 6 ? '✓' : '✗'} 6+ characters
+                          </li>
+                          <li className={/\d/.test(password) ? 'text-green-400' : 'text-red-400'}>
+                            {/\d/.test(password) ? '✓' : '✗'} One number (0-9)
+                          </li>
+                        </ul>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -348,8 +365,9 @@ const LoginPage = ({ onLoginSuccess }) => {
               {/* Submit Button */}
               <button
                 type="submit"
-                disabled={loading || password !== confirmPassword || passwordStrength < 80}
+                disabled={loading || password !== confirmPassword || passwordStrength < 60}
                 className={`${STYLES.button.primary} w-full mt-6 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed`}
+                title={passwordStrength < 60 ? `Password strength: ${passwordStrength}% (Need 60%: uppercase, lowercase, and number or special char)` : 'Click to sign up'}
               >
                 {loading ? (
                   <>

@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.3"))
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
     
+    # Qdrant Configuration (Cloud Migration)
+    QDRANT_MODE: str = os.getenv("QDRANT_MODE", "cloud")  # 'cloud' or 'local'
+    QDRANT_CLOUD_URL: str = os.getenv("QDRANT_CLOUD_URL", "")
+    QDRANT_CLOUD_API_KEY: str = os.getenv("QDRANT_CLOUD_API_KEY", "")
+    
+    # Legacy settings (for backwards compatibility)
+    QDRANT_URL: str = os.getenv("QDRANT_URL", "")
+    QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
+    
     class Config:
         env_file = ".env"
         extra = "ignore"
