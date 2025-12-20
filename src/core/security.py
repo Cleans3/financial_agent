@@ -59,8 +59,21 @@ async def get_current_user(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid token")
     return {"user_id": user_id, "is_admin": payload.get("is_admin", False)}
 
-async def get_admin_user(current_user: dict = Depends(get_current_user)) -> dict:
+async def get_admin_user(current_user: dict = Depends(get_current_user)):
+    """Get admin user from database - requires admin privileges"""
     if not current_user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin access required")
-    return current_user
+    
+    # Fetch the user from database to return User object
+    from ..database.database import SessionLocal
+    from ..database.models import User
+    
+    session = SessionLocal()
+    try:
+        user = session.query(User).filter(User.id == current_user.get("user_id")).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        return user
+    finally:
+        session.close()
 

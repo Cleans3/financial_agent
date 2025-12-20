@@ -271,15 +271,15 @@ const AdminDashboard = ({ user, onLogout, onClose }) => {
                   <tbody className="divide-y divide-gray-700">
                     {users.map(user => (
                       <tr key={user.id} className="hover:bg-gray-700 transition">
-                        <td className="px-6 py-4 whitespace-nowrap text-sm">{user.name}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm">{user.username}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-400">{user.email}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm">
                           <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-                            user.role === 'admin'
+                            user.is_admin
                               ? 'bg-red-900 text-red-200'
                               : 'bg-blue-900 text-blue-200'
                           }`}>
-                            {user.role}
+                            {user.is_admin ? 'admin' : 'user'}
                           </span>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm">

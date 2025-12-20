@@ -381,23 +381,6 @@ const LoginPage = ({ onLoginSuccess }) => {
             </form>
           )}
 
-          {/* Demo Credentials */}
-          {!isRegistering && (
-            <div className="mt-8 pt-8 border-t border-slate-700">
-              <p className="text-slate-400 text-sm text-center mb-4">Demo Credentials:</p>
-              <div className="bg-slate-700/50 p-4 rounded-lg space-y-2 border border-slate-600">
-                <div>
-                  <p className="text-xs text-slate-500 uppercase tracking-wider">Username</p>
-                  <p className="text-slate-300 font-mono">admin</p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-500 uppercase tracking-wider">Password</p>
-                  <p className="text-slate-300 font-mono">admin123</p>
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* Features List */}
           <div className="mt-8 pt-8 border-t border-slate-700">
             <p className="text-slate-400 text-xs text-center mb-4 uppercase tracking-wider">Features</p>

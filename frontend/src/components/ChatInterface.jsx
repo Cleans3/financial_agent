@@ -508,19 +508,6 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh 
 
           {/* Input Container - Flex with no wrap */}
           <div className="flex items-stretch gap-3">
-            {/* Documents Button */}
-            <button
-              type="button"
-              onClick={() => setShowDocumentPanel(true)}
-              className="bg-purple-600 hover:bg-purple-700 text-white rounded-full
-                       transition-all duration-200 transform hover:scale-110 active:scale-95
-                       flex-shrink-0 flex items-center justify-center
-                       w-12 h-12 min-w-12 min-h-12"
-              title="Manage documents and RAG search"
-            >
-              <BookOpen className="w-6 h-6" />
-            </button>
-
             {/* File Upload Button - Circle */}
             <button
               type="button"

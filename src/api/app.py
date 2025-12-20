@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, sta
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Union
 import logging
 import asyncio
 import os
@@ -1526,7 +1526,6 @@ class AdminUserResponse(BaseModel):
     is_admin: bool
     is_active: bool
     created_at: Optional[str]
-    last_login: Optional[str]
     sessions: int
     messages: int
 
@@ -1544,11 +1543,11 @@ class AdminAuditLog(BaseModel):
     action: str
     resource_type: Optional[str]
     resource_id: Optional[str]
-    details: Optional[dict]
+    details: Optional[Union[str, dict]]
     created_at: Optional[str]
 
 
-@app.get("/admin/users", response_model=List[AdminUserResponse])
+@app.get("/api/admin/users", response_model=List[AdminUserResponse])
 async def get_users_list(
     skip: int = 0,
     limit: int = 100,
@@ -1571,7 +1570,7 @@ async def get_users_list(
     return users
 
 
-@app.get("/admin/users/{user_id}")
+@app.get("/api/admin/users/{user_id}")
 async def get_user_details(
     user_id: str,
     current_user: User = Depends(get_admin_user),
@@ -1586,7 +1585,7 @@ async def get_user_details(
     return stats
 
 
-@app.post("/admin/users/{user_id}/toggle-active")
+@app.post("/api/admin/users/{user_id}/toggle-active")
 async def toggle_user_active(
     user_id: str,
     is_active: bool,
@@ -1605,7 +1604,7 @@ async def toggle_user_active(
     return {"success": True, "message": f"User {status_str} successfully"}
 
 
-@app.get("/admin/stats", response_model=AdminSystemStats)
+@app.get("/api/admin/stats", response_model=AdminSystemStats)
 async def get_system_stats(
     current_user: User = Depends(get_admin_user),
     db: Session = Depends(get_db)
@@ -1616,7 +1615,7 @@ async def get_system_stats(
     return stats
 
 
-@app.get("/admin/rag-stats")
+@app.get("/api/admin/rag-stats")
 async def get_rag_stats(
     current_user: User = Depends(get_admin_user),
     db: Session = Depends(get_db)
@@ -1627,7 +1626,7 @@ async def get_rag_stats(
     return stats
 
 
-@app.get("/admin/audit-logs", response_model=List[AdminAuditLog])
+@app.get("/api/admin/audit-logs", response_model=List[AdminAuditLog])
 async def get_audit_logs(
     user_id: Optional[str] = None,
     days: int = 7,
@@ -1640,7 +1639,7 @@ async def get_audit_logs(
     return logs
 
 
-@app.delete("/admin/users/{user_id}/data")
+@app.delete("/api/admin/users/{user_id}/data")
 async def delete_user_data(
     user_id: str,
     current_user: User = Depends(get_admin_user),
