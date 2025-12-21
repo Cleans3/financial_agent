@@ -4,6 +4,7 @@ FastAPI Application with Authentication & Database Integration
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 from typing import Optional, List, Union
@@ -624,6 +625,139 @@ async def chat(
     except Exception as e:
         logger.error(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/chat-stream")
+async def chat_stream(
+    request: ChatRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Chat endpoint with streaming thinking steps
+    Streams real-time thinking steps as the agent processes
+    """
+    import json
+    
+    async def generate():
+        try:
+            agent_instance = get_agent()
+            user_id = current_user["user_id"]
+            
+            session_id = request.session_id
+            if not session_id:
+                session = ChatSession(user_id=user_id, title=request.question[:50], use_rag=request.use_rag)
+                db.add(session)
+                db.commit()
+                db.refresh(session)
+                session_id = session.id
+                # Yield the new session ID first
+                yield f'data: {json.dumps({"type": "session_id", "session_id": session_id})}\n\n'
+            else:
+                session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+                if not session or session.user_id != user_id:
+                    yield f'data: {json.dumps({"type": "error", "message": "Access denied"})}\n\n'
+                    return
+            
+            # Auto-cleanup: Delete empty/greeting-only sessions
+            try:
+                deleted_count = SessionService.delete_empty_sessions(db, user_id, exclude_session_id=session_id)
+                if deleted_count > 0:
+                    logger.info(f"Auto-deleted {deleted_count} empty conversation(s) for user {user_id}")
+            except Exception as cleanup_error:
+                logger.warning(f"Cleanup error (non-critical): {cleanup_error}")
+            
+            history = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).all()
+            
+            # Convert history to format for agent
+            conversation_history = [
+                {"role": msg.role, "content": msg.content}
+                for msg in history
+            ]
+            
+            # Detect if user explicitly requests RAG
+            force_rag = False
+            rag_keywords = ["use rag", "con rag", "sử dụng rag", "với rag", "kèm rag", "dùng rag"]
+            if any(keyword.lower() in request.question.lower() for keyword in rag_keywords):
+                force_rag = True
+                logger.info(f"User explicitly requested RAG: {request.question[:50]}")
+            
+            # Use RAG router to decide if documents are needed
+            should_use_rag = request.use_rag
+            routing_decision = None
+            
+            if request.use_rag and not force_rag:
+                try:
+                    from ..services.rag_router import get_rag_router
+                    router = get_rag_router()
+                    should_use_rag, routing_decision = await router.should_use_rag(
+                        request.question,
+                        conversation_history
+                    )
+                    logger.info(f"RAG router decision: use_rag={should_use_rag}")
+                except Exception as router_error:
+                    logger.warning(f"RAG router error (defaulting to enabled): {router_error}")
+                    should_use_rag = True
+            elif force_rag:
+                should_use_rag = True
+                routing_decision = {
+                    "use_rag": True,
+                    "query_type": "explicit_rag_request",
+                    "confidence": 1.0,
+                    "reasoning": "User explicitly requested RAG"
+                }
+            
+            # Handle RAG document retrieval
+            rag_documents = None
+            if should_use_rag:
+                try:
+                    from src.services.rag_service import get_rag_service
+                    rag_service = get_rag_service()
+                    rag_documents = rag_service.search(
+                        query=request.question,
+                        top_k=3,
+                        user_id=user_id
+                    )
+                    logger.info(f"Retrieved {len(rag_documents)} documents from RAG")
+                    # Stream RAG decision
+                    yield f'data: {json.dumps({"type": "rag_status", "used": True, "count": len(rag_documents)})}\n\n'
+                except Exception as rag_error:
+                    logger.warning(f"RAG retrieval failed: {rag_error}")
+                    rag_documents = None
+                    yield f'data: {json.dumps({"type": "rag_status", "used": False, "reason": str(rag_error)})}\n\n'
+            else:
+                yield f'data: {json.dumps({"type": "rag_status", "used": False})}\n\n'
+            
+            logger.info(f"Processing question for user {user_id}: {request.question[:50]}")
+            answer, thinking_steps = await agent_instance.aquery(
+                request.question, 
+                user_id=user_id, 
+                session_id=session_id,
+                conversation_history=conversation_history,
+                rag_documents=rag_documents
+            )
+            
+            # Stream each thinking step as it was calculated
+            for step in thinking_steps:
+                yield f'data: {json.dumps({"type": "thinking_step", "step": step})}\n\n'
+                await asyncio.sleep(0.1)  # Small delay for better UX
+            
+            # Save messages to database
+            user_msg = ChatMessage(session_id=session_id, role="user", content=request.question)
+            assistant_msg = ChatMessage(session_id=session_id, role="assistant", content=answer)
+            db.add(user_msg)
+            db.add(assistant_msg)
+            db.commit()
+            db.refresh(assistant_msg)
+            
+            # Stream final answer
+            yield f'data: {json.dumps({"type": "answer", "content": answer, "message_id": assistant_msg.id})}\n\n'
+            
+        except Exception as e:
+            logger.error(f"Chat stream error: {e}")
+            yield f'data: {json.dumps({"type": "error", "message": str(e)})}\n\n'
+    
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 # ==================== Session Endpoints ====================

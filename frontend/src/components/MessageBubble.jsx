@@ -17,7 +17,7 @@ import remarkGfm from "remark-gfm";
 
 const MessageBubble = ({ message }) => {
   const [copied, setCopied] = useState(false);
-  const [showThinkingSteps, setShowThinkingSteps] = useState(message.thinkingSteps && message.thinkingSteps.length > 0); // Show by default if steps exist
+  const [showThinkingSteps, setShowThinkingSteps] = useState(true); // Always show thinking steps expanded by default
   const isUser = message.role === "user";
 
   const copyToClipboard = (text) => {
@@ -89,29 +89,67 @@ const MessageBubble = ({ message }) => {
 
           {/* Thinking Steps (collapsible) */}
           {message.thinkingSteps && message.thinkingSteps.length > 0 && (
-            <div className="mb-4 border-l-2 border-cyan-500">
+            <div className="mb-4 border-l-4 border-blue-500 bg-slate-900/60 rounded-r-lg p-3">
               <button
                 onClick={() => setShowThinkingSteps(!showThinkingSteps)}
-                className="flex items-center gap-2 text-cyan-400 hover:text-cyan-300 transition-colors text-sm font-medium p-2 pl-3"
+                className="flex items-center gap-2 text-blue-400 hover:text-blue-300 transition-colors text-sm font-semibold p-0 mb-2"
               >
                 {showThinkingSteps ? (
-                  <ChevronUp className="w-4 h-4" />
+                  <ChevronUp className="w-5 h-5" />
                 ) : (
-                  <ChevronDown className="w-4 h-4" />
+                  <ChevronDown className="w-5 h-5" />
                 )}
-                🧠 Reasoning Steps
+                🧠 Agent Thinking Process ({message.thinkingSteps.length} step{message.thinkingSteps.length > 1 ? 's' : ''})
               </button>
+              
               {showThinkingSteps && (
-                <div className="pl-3 space-y-2 text-xs">
-                  {message.thinkingSteps.map((step, idx) => (
-                    <div key={idx} className="bg-slate-800/50 rounded p-2 border border-slate-700">
-                      <div className="font-semibold text-cyan-300">{step.title}</div>
-                      <div className="text-slate-400 text-xs mt-1">{step.description}</div>
-                      {step.result && (
-                        <div className="text-emerald-400 text-xs mt-1">✓ {step.result}</div>
-                      )}
-                    </div>
-                  ))}
+                <div className="space-y-3">
+                  {message.thinkingSteps.map((step, idx) => {
+                    // Determine color based on step type
+                    let stepColor = "border-slate-600 bg-slate-800/40";
+                    let titleColor = "text-blue-300";
+                    let resultColor = "text-emerald-400";
+                    
+                    if (step.title?.includes("Rewriting")) {
+                      stepColor = "border-amber-600/50 bg-amber-900/20";
+                      titleColor = "text-amber-300";
+                    } else if (step.title?.includes("RAG") || step.title?.includes("Filtering")) {
+                      stepColor = "border-emerald-600/50 bg-emerald-900/20";
+                      titleColor = "text-emerald-300";
+                      resultColor = "text-emerald-300";
+                    } else if (step.title?.includes("Tool") || step.title?.includes("Selecting")) {
+                      stepColor = "border-purple-600/50 bg-purple-900/20";
+                      titleColor = "text-purple-300";
+                    } else if (step.title?.includes("Generating")) {
+                      stepColor = "border-cyan-600/50 bg-cyan-900/20";
+                      titleColor = "text-cyan-300";
+                    }
+                    
+                    return (
+                      <div key={idx} className={`rounded-lg p-2.5 border-l-2 ${stepColor} transition-all`}>
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <div className={`font-semibold text-sm ${titleColor}`}>
+                              {step.title}
+                            </div>
+                            {step.description && (
+                              <div className="text-slate-400 text-xs mt-1.5 leading-relaxed">
+                                {step.description}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        {step.result && (
+                          <div className={`text-xs mt-2 inline-block px-2 py-1 rounded-full ${
+                            resultColor.includes("emerald") ? "bg-emerald-900/30" : "bg-slate-700/50"
+                          }`}>
+                            <span className="mr-1">✓</span>
+                            <span className={resultColor}>{step.result}</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

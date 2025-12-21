@@ -16,6 +16,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [refreshSidebar, setRefreshSidebar] = useState(0);
   const [showAdminDashboard, setShowAdminDashboard] = useState(false);
+  const [isAgentThinking, setIsAgentThinking] = useState(false); // Global agent thinking state
 
   // Check if user is already logged in on app load
   useEffect(() => {
@@ -107,6 +108,7 @@ function App() {
         onConversationDeleted={handleConversationDeleted}
         currentConversationId={currentConversationId}
         refreshTrigger={refreshSidebar}
+        isAgentThinking={isAgentThinking}
       />
 
       {/* Main Content */}
@@ -121,6 +123,7 @@ function App() {
           conversationId={currentConversationId}
           onConversationChange={handleConversationChange}
           onSidebarRefresh={() => setRefreshSidebar(prev => prev + 1)}
+          onAgentThinkingChange={setIsAgentThinking}
         />
       </div>
 

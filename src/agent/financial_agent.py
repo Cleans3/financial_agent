@@ -172,6 +172,22 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                 response = await chain.ainvoke({"messages": state["messages"]})
                 content = response.content if hasattr(response, 'content') else str(response)
                 
+                # CRITICAL FIX: Validate that LLM didn't return an explanation instead of data
+                # If it did, try to extract and format the data directly
+                is_valid_response = self._validate_response_is_not_explanation(content)
+                if not is_valid_response:
+                    logger.error(f"❌ LLM returned explanation instead of formatted data. Attempting to extract and format data...")
+                    # Try to extract actual data from tool message and format it
+                    formatted_content = await self._extract_and_format_tool_data(last_msg.content)
+                    if formatted_content:
+                        logger.info(f"✓ Successfully extracted and formatted tool data")
+                        final_response = AIMessage(content=formatted_content)
+                        return {"messages": state["messages"] + [final_response]}
+                    else:
+                        logger.warning(f"Could not extract data, returning LLM response as-is")
+                        final_response = AIMessage(content=content)
+                        return {"messages": state["messages"] + [final_response]}
+                
                 # Create AIMessage with the processed result
                 final_response = AIMessage(content=content)
                 return {"messages": state["messages"] + [final_response]}
@@ -389,6 +405,37 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             
             # Run graph
             result = await self.app.ainvoke(initial_state)
+            
+            # Extract tool calls from the graph result to show which tools were used
+            tool_calls_made = []
+            for msg in result.get("messages", []):
+                if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tool_call in msg.tool_calls:
+                        tool_name = tool_call.get('name', 'unknown') if isinstance(tool_call, dict) else getattr(tool_call, 'name', 'unknown')
+                        tool_calls_made.append(tool_name)
+            
+            # Add tool selection step if tools were called
+            if tool_calls_made:
+                unique_tools = list(set(tool_calls_made))  # Remove duplicates
+                thinking_steps.insert(3, {  # Insert before "Generating Answer" step
+                    "step": 3,
+                    "title": "🔧 Selecting Tools",
+                    "description": f"Analyzing query to determine needed tools...",
+                    "result": f"Using {len(unique_tools)} tool(s): {', '.join(unique_tools)}"
+                })
+                # Adjust step numbers
+                for i in range(4, len(thinking_steps)):
+                    thinking_steps[i]["step"] = i + 1
+            else:
+                thinking_steps.insert(3, {  # Insert before "Generating Answer" step
+                    "step": 3,
+                    "title": "🔧 Tool Selection",
+                    "description": "Analyzing query to determine if tools are needed...",
+                    "result": "No tools needed - answering from knowledge base"
+                })
+                # Adjust step numbers
+                for i in range(4, len(thinking_steps)):
+                    thinking_steps[i]["step"] = i + 1
             
             # Get final answer
             final_message = result["messages"][-1]
@@ -685,6 +732,116 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         except Exception as e:
             logger.error(f"Error formatting tool result: {str(e)}")
             return f"Lỗi khi định dạng kết quả: {str(e)}"
+    
+    def _validate_response_is_not_explanation(self, response: str) -> bool:
+        """
+        Validate that the response is actual formatted data, not an explanation of JSON structure.
+        
+        Args:
+            response: The response from LLM
+            
+        Returns:
+            True if response contains actual data/table, False if it's explaining structure
+        """
+        import re
+        
+        response_lower = response.lower()
+        
+        # Keywords that indicate explanation instead of data display
+        bad_keywords = [
+            "đối tượng json",
+            "cấu trúc json", 
+            "json chứa",
+            "mảng dữ liệu",
+            "từng phần tử",
+            "bản ghi dữ liệu",
+            "json.loads",
+            "json parsing",
+            "dữ liệu này chứa",
+            "dữ liệu bao gồm",
+            "có các trường",
+            "các khóa",
+            "mảng chứa",
+            "đây là một",
+            "kết quả là một",
+            "để sử dụng",
+            "duyệt qua",
+        ]
+        
+        # Check if response contains explanation keywords
+        for keyword in bad_keywords:
+            if keyword in response_lower:
+                logger.error(f"❌ Found explanation keyword: '{keyword}'")
+                return False
+        
+        # Check if response contains actual table markdown (valid response)
+        if re.search(r'\|\s*[A-Za-z0-9_\u0080-\uffff\s]+\s*\|', response):
+            logger.info(f"✓ Response contains Markdown table - likely valid")
+            return True
+        
+        # Check if response starts with common explanation patterns
+        first_sentence = response.split('\n')[0].strip() if response else ""
+        explanation_starters = [
+            "dữ liệu này",
+            "kết quả trả",
+            "để ",
+            "ngoài ra",
+            "theo như",
+        ]
+        
+        for starter in explanation_starters:
+            if first_sentence.lower().startswith(starter):
+                logger.error(f"❌ Response starts with explanation pattern: '{starter}'")
+                return False
+        
+        # If response is very short and doesn't contain meaningful data, it's likely invalid
+        if len(response.strip()) < 50 and not re.search(r'\d{4}-\d{2}', response):
+            logger.warning(f"⚠️ Response is very short and contains no date patterns")
+            # Could be valid for some types of responses, so don't fail here
+        
+        logger.info(f"✓ Response appears to be valid formatted data")
+        return True
+    
+    async def _extract_and_format_tool_data(self, tool_content: str) -> str:
+        """
+        Fallback: Extract JSON data from tool result and format it as a proper table.
+        This is used when the LLM fails to format the data correctly.
+        
+        Args:
+            tool_content: Raw tool message content (usually JSON string)
+            
+        Returns:
+            Formatted Markdown table or empty string if extraction fails
+        """
+        import json
+        
+        logger.info("🔧 Attempting to extract and format tool data directly...")
+        
+        try:
+            # Try to parse the tool content as JSON
+            if isinstance(tool_content, str):
+                # First try direct JSON parse
+                try:
+                    data = json.loads(tool_content)
+                except json.JSONDecodeError:
+                    # If not valid JSON, try to extract JSON from the string
+                    import re
+                    json_match = re.search(r'\{.*\}', tool_content, re.DOTALL)
+                    if json_match:
+                        data = json.loads(json_match.group())
+                    else:
+                        logger.error(f"Could not find JSON in tool content")
+                        return ""
+            else:
+                data = tool_content
+            
+            # Format based on data type
+            formatted = self._format_tool_result(data)
+            return formatted
+            
+        except Exception as e:
+            logger.error(f"Failed to extract and format tool data: {e}")
+            return ""
     
     async def rewrite_query_with_context(self, question: str, conversation_history: list = None) -> tuple:
         """

@@ -3,7 +3,7 @@ import { useState, useEffect } from "react";
 import { conversationService } from "../services/conversationService";
 import { COLORS, STYLES } from "../theme/colors";
 
-const Sidebar = ({ isOpen, onClose, user, onNewChat, onSelectConversation, onConversationDeleted, currentConversationId, refreshTrigger }) => {
+const Sidebar = ({ isOpen, onClose, user, onNewChat, onSelectConversation, onConversationDeleted, currentConversationId, refreshTrigger, isAgentThinking }) => {
   const [conversations, setConversations] = useState([]);
   const [recentExpanded, setRecentExpanded] = useState(true);
 
@@ -106,7 +106,11 @@ const Sidebar = ({ isOpen, onClose, user, onNewChat, onSelectConversation, onCon
         <div className="px-4 py-2">
           <button
             onClick={handleNewChat}
-            className={`w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${STYLES.button.primary}`}
+            disabled={isAgentThinking}
+            className={`w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${STYLES.button.primary} ${
+              isAgentThinking ? 'opacity-50 cursor-not-allowed' : ''
+            }`}
+            title={isAgentThinking ? "Please wait for the current response to complete" : ""}
           >
             <Plus className="w-4 h-4" />
             Cuộc trò chuyện mới
@@ -131,12 +135,13 @@ const Sidebar = ({ isOpen, onClose, user, onNewChat, onSelectConversation, onCon
                   {recentConversations.map(conv => (
                     <div
                       key={conv.id}
-                      onClick={() => handleSelectConversation(conv.id)}
+                      onClick={() => !isAgentThinking && handleSelectConversation(conv.id)}
                       className={`p-3 rounded-lg cursor-pointer transition-all ${
                         currentConversationId === conv.id
                           ? `bg-cyan-500/20 text-white`
                           : `bg-slate-700/30 text-slate-300 hover:bg-slate-700/50`
-                      }`}
+                      } ${isAgentThinking && currentConversationId !== conv.id ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      title={isAgentThinking && currentConversationId !== conv.id ? "Read-only: Agent is thinking in another conversation" : ""}
                     >
                       <div className="flex items-start gap-2">
                         <MessageCircle className="w-4 h-4 mt-1 flex-shrink-0" />
@@ -146,8 +151,9 @@ const Sidebar = ({ isOpen, onClose, user, onNewChat, onSelectConversation, onCon
                         </div>
                         <div className="flex gap-1 flex-shrink-0">
                           <button
-                            onClick={(e) => handleDeleteConversation(conv.id, e)}
-                            className="p-1 hover:bg-red-500/20 rounded transition-colors"
+                            onClick={(e) => !isAgentThinking && handleDeleteConversation(conv.id, e)}
+                            disabled={isAgentThinking}
+                            className={`p-1 hover:bg-red-500/20 rounded transition-colors ${isAgentThinking ? 'opacity-50 cursor-not-allowed' : ''}`}
                           >
                             <Trash2 className="w-3 h-3 text-red-400" />
                           </button>

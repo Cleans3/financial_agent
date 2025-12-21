@@ -5,7 +5,7 @@ import MessageBubble from "./MessageBubble";
 import DocumentPanel from "./DocumentPanel";
 import { conversationService } from "../services/conversationService";
 
-const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh }) => {
+const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh, onAgentThinkingChange }) => {
   const [messages, setMessages] = useState([
     {
       role: "assistant",
@@ -30,9 +30,9 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh 
   // Reset messages when conversation changes
   useEffect(() => {
     const loadConversation = async () => {
-      // Don't switch conversations if agent is thinking in another conversation
-      if (isLoading && activeConversationId && activeConversationId !== conversationId) {
-        return; // Stay in the active conversation
+      // Don't switch conversations if agent is thinking in this or another conversation
+      if (isLoading) {
+        return; // Don't load while agent is thinking in ANY conversation
       }
       
       if (conversationId === null) {
@@ -131,6 +131,9 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh 
     // Add user message (only for existing conversations)
     setMessages((prev) => [...prev, { role: "user", content: userMessage || "Phân tích file" }]);
     setIsLoading(true);
+    
+    // Notify parent that agent is thinking
+    onAgentThinkingChange?.(true);
 
     try {
       // If files are uploaded, process them
@@ -190,30 +193,109 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh 
         // Clear previous thinking steps
         setThinkingSteps([]);
 
-        const response = await axios.post("/api/chat", {
-          question: userMessage,
-          session_id: conversationId,
-          use_rag: useRAG,
-        });
+        try {
+          // Use streaming API for real-time thinking steps
+          const token = localStorage.getItem('token');
+          const response = await fetch("/api/chat-stream", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              question: userMessage,
+              session_id: conversationId,
+              use_rag: useRAG,
+            }),
+          });
 
-        console.log("Chat response:", response.data);
-        const { thinking_steps, answer } = response.data;
-        
-        console.log("Thinking steps:", thinking_steps);
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
 
-        // Add final answer with thinking steps
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            content: answer,
-            isThinking: false,
-            thinkingSteps: thinking_steps || [],
-          },
-        ]);
-        
-        // Clear thinking steps from loading display
-        setThinkingSteps([]);
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let finalAnswer = "";
+          let finalMessageId = "";
+          let sessionId = conversationId;
+          let collectedSteps = []; // Collect steps locally
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split("\n");
+
+            for (const line of lines) {
+              if (line.startsWith("data: ")) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+
+                  if (data.type === "session_id") {
+                    sessionId = data.session_id;
+                  } else if (data.type === "rag_status") {
+                    // Add RAG status to thinking steps
+                    if (data.used) {
+                      const ragStep = {
+                        step: 0,
+                        title: "🗂️ RAG Retrieval",
+                        description: `Searching documents for relevant information...`,
+                        result: `Retrieved ${data.count} relevant documents`,
+                      };
+                      collectedSteps.push(ragStep);
+                      setThinkingSteps((prev) => [...prev, ragStep]);
+                    } else {
+                      const ragStep = {
+                        step: 0,
+                        title: "🗂️ RAG Check",
+                        description: "Deciding if document retrieval is needed...",
+                        result: "Using knowledge base only - no documents needed",
+                      };
+                      collectedSteps.push(ragStep);
+                      setThinkingSteps((prev) => [...prev, ragStep]);
+                    }
+                  } else if (data.type === "thinking_step") {
+                    // Stream thinking steps in real-time
+                    collectedSteps.push(data.step);
+                    setThinkingSteps((prev) => [...prev, data.step]);
+                  } else if (data.type === "answer") {
+                    finalAnswer = data.content;
+                    finalMessageId = data.message_id;
+                  } else if (data.type === "error") {
+                    throw new Error(data.message);
+                  }
+                } catch (e) {
+                  // Skip non-JSON lines or parse errors
+                }
+              }
+            }
+          }
+
+          // Replace loading message with final answer
+          if (finalAnswer) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                content: finalAnswer,
+                isThinking: false,
+                thinkingSteps: collectedSteps,
+              },
+            ]);
+          }
+
+          setThinkingSteps([]);
+        } catch (error) {
+          console.error("Error:", error);
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: `Xin lỗi, đã có lỗi xảy ra: ${error.message}`,
+            },
+          ]);
+        }
       }
     } catch (error) {
       console.error("Error:", error);
@@ -230,6 +312,7 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh 
       setIsLoading(false);
       setThinkingSteps([]);  // Clear thinking steps
       setActiveConversationId(null); // Clear active conversation when done thinking
+      onAgentThinkingChange?.(false); // Notify parent that agent is done thinking
       // Only refresh sidebar on conversation creation or cleanup
       // Don't refresh on every message to avoid excessive API calls
       try {
@@ -450,11 +533,17 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh 
                 {thinkingSteps.length > 0 && (
                   <div className="space-y-2 text-xs">
                     {thinkingSteps.map((step, idx) => (
-                      <div key={idx} className="bg-slate-900/50 rounded p-2 border border-slate-600">
+                      <div key={idx} className={`bg-slate-900/50 rounded p-2 border transition-all ${
+                        step.title?.includes("RAG") ? "border-emerald-600/50" : "border-slate-600"
+                      }`}>
                         <div className="font-semibold text-cyan-300">{step.title}</div>
                         <div className="text-slate-400 text-xs mt-1">{step.description}</div>
                         {step.result && (
-                          <div className="text-emerald-400 text-xs mt-1">✓ {step.result}</div>
+                          <div className={`text-xs mt-1 ${
+                            step.title?.includes("RAG") ? "text-emerald-300" : "text-emerald-400"
+                          }`}>
+                            ✓ {step.result}
+                          </div>
                         )}
                       </div>
                     ))}
