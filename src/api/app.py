@@ -537,11 +537,18 @@ async def chat(
             for msg in history
         ]
         
+        # Detect if user explicitly requests RAG (e.g., "what is 1+1, use RAG")
+        force_rag = False
+        rag_keywords = ["use rag", "con rag", "sử dụng rag", "với rag", "kèm rag", "dùng rag"]
+        if any(keyword.lower() in request.question.lower() for keyword in rag_keywords):
+            force_rag = True
+            logger.info(f"User explicitly requested RAG: {request.question[:50]}")
+        
         # Use RAG router to decide if documents are needed (agentic routing)
         should_use_rag = request.use_rag  # Default to user preference
         routing_decision = None
         
-        if request.use_rag:
+        if request.use_rag and not force_rag:
             try:
                 from ..services.rag_router import get_rag_router
                 router = get_rag_router()  # Router gets LLM from factory, not agent
@@ -553,6 +560,15 @@ async def chat(
             except Exception as router_error:
                 logger.warning(f"RAG router error (defaulting to enabled): {router_error}")
                 should_use_rag = True
+        elif force_rag:
+            should_use_rag = True
+            routing_decision = {
+                "use_rag": True,
+                "query_type": "explicit_rag_request",
+                "confidence": 1.0,
+                "reasoning": "User explicitly requested RAG"
+            }
+            logger.info("User forced RAG - bypassing router decision")
         
         # Handle RAG document retrieval if router decision is YES
         rag_documents = None
@@ -1691,6 +1707,189 @@ async def delete_user_data(
     )
     
     return {"success": True, "message": "User data deleted permanently"}
+
+
+# ==================== Admin Document Management ====================
+
+@app.post("/api/admin/documents/upload")
+async def admin_upload_document(
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(None),
+    category: Optional[str] = Form(None),
+    tags: Optional[str] = Form(None),
+    current_user: User = Depends(get_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Upload document to shared vectorDB (Admin only)"""
+    from ..services.document_service import DocumentService
+    from ..services.rag_service import get_rag_service
+    import json
+    import uuid
+    
+    if not file or file.size == 0:
+        raise HTTPException(status_code=400, detail="No file provided")
+    
+    doc_id = str(uuid.uuid4())
+    tags_list = []
+    
+    try:
+        if tags:
+            tags_list = json.loads(tags)
+    except:
+        tags_list = []
+    
+    # Save temp file
+    temp_dir = tempfile.gettempdir()
+    temp_path = os.path.join(temp_dir, f"{doc_id}_{file.filename}")
+    
+    try:
+        content = await file.read()
+        with open(temp_path, 'wb') as f:
+            f.write(content)
+        
+        # Process document
+        doc_service = DocumentService()
+        success, message, chunk_count = doc_service.process_file(
+            temp_path, 
+            doc_id, 
+            title or file.filename,
+            "admin"
+        )
+        
+        if not success:
+            raise HTTPException(status_code=400, detail=message)
+        
+        # Add to RAG
+        rag_service = get_rag_service()
+        text_content = doc_service.get_file_content(temp_path)
+        actual_chunks = rag_service.add_document(
+            doc_id,
+            text_content,
+            title or file.filename,
+            file.filename,
+            "admin"
+        )
+        
+        # Log to database
+        AdminService.log_admin_document_upload(
+            db,
+            current_user.id,
+            doc_id,
+            file.filename,
+            file.size,
+            actual_chunks,
+            category,
+            tags_list
+        )
+        
+        AdminService.log_action(
+            db,
+            current_user.id,
+            "upload_document",
+            "Document",
+            doc_id,
+            f"Uploaded {actual_chunks} chunks"
+        )
+        
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "filename": file.filename,
+            "chunks": actual_chunks,
+            "message": f"Document processed successfully ({actual_chunks} chunks)"
+        }
+    
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+@app.get("/api/admin/documents")
+async def admin_list_documents(
+    skip: int = 0,
+    limit: int = 50,
+    current_user: User = Depends(get_admin_user),
+    db: Session = Depends(get_db)
+):
+    """List all documents in vectorDB (Admin only)"""
+    documents = AdminService.get_all_documents(db, skip=skip, limit=limit)
+    total = AdminService.get_total_documents_count(db)
+    
+    AdminService.log_action(
+        db,
+        current_user.id,
+        "view_documents",
+        "Document",
+        None,
+        f"Listed {len(documents)} documents"
+    )
+    
+    return {
+        "documents": documents,
+        "total": total,
+        "skip": skip,
+        "limit": limit
+    }
+
+
+@app.get("/api/admin/documents/{doc_id}")
+async def admin_get_document_details(
+    doc_id: str,
+    current_user: User = Depends(get_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Get details for a specific document (Admin only)"""
+    from ..services.rag_service import get_rag_service
+    
+    rag_service = get_rag_service()
+    chunks = rag_service.get_document_chunks(doc_id)
+    doc_info = AdminService.get_document_info(db, doc_id)
+    
+    AdminService.log_action(
+        db,
+        current_user.id,
+        "view_document_details",
+        "Document",
+        doc_id
+    )
+    
+    return {
+        "doc_id": doc_id,
+        "upload_info": doc_info,
+        "chunk_count": len(chunks),
+        "chunks": chunks[:10]  # First 10 chunks
+    }
+
+
+@app.delete("/api/admin/documents/{doc_id}")
+async def admin_delete_document(
+    doc_id: str,
+    current_user: User = Depends(get_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Delete document from vectorDB (Admin only) - PERMANENT"""
+    from ..services.rag_service import get_rag_service
+    
+    try:
+        rag_service = get_rag_service()
+        rag_service.delete_documents(doc_id)
+        
+        AdminService.delete_document_record(db, doc_id)
+        
+        AdminService.log_action(
+            db,
+            current_user.id,
+            "delete_document",
+            "Document",
+            doc_id,
+            "Permanently deleted from vectorDB"
+        )
+        
+        return {"success": True, "message": f"Document {doc_id} deleted permanently"}
+    
+    except Exception as e:
+        logger.error(f"Error deleting document {doc_id}: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to delete document: {str(e)}")
 
 
 @app.on_event("shutdown")

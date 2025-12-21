@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts'
 import { ArrowLeft } from 'lucide-react'
 import axios from 'axios'
+import DocumentManagementPanel from './DocumentManagementPanel'
 
 const AdminDashboard = ({ user, onLogout, onClose }) => {
   const [activeTab, setActiveTab] = useState('dashboard')
@@ -139,7 +140,7 @@ const AdminDashboard = ({ user, onLogout, onClose }) => {
       <div className="bg-gray-800 border-b border-gray-700">
         <div className="max-w-7xl mx-auto px-4">
           <nav className="flex space-x-8">
-            {['dashboard', 'users', 'logs'].map(tab => (
+            {['dashboard', 'users', 'documents', 'logs'].map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -311,6 +312,13 @@ const AdminDashboard = ({ user, onLogout, onClose }) => {
                 </table>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Documents Tab */}
+        {activeTab === 'documents' && (
+          <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
+            <DocumentManagementPanel api={api} />
           </div>
         )}
 

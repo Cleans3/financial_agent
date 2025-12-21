@@ -341,4 +341,122 @@ class AdminService:
         except Exception as e:
             logger.error(f"Error deleting user data: {e}")
             db.rollback()
+            return False    
+    @staticmethod
+    def log_admin_document_upload(
+        db: Session,
+        admin_id: str,
+        doc_id: str,
+        filename: str,
+        file_size: int,
+        chunk_count: int,
+        category: Optional[str] = None,
+        tags: Optional[List[str]] = None
+    ) -> bool:
+        """Log document upload to database"""
+        try:
+            from ..database.models import DocumentUpload
+            
+            upload = DocumentUpload(
+                id=doc_id,
+                doc_id=doc_id,
+                uploaded_by_admin_id=admin_id,
+                filename=filename,
+                file_size_bytes=file_size,
+                chunk_count=chunk_count,
+                status="completed",
+                tags=tags or [],
+                category=category,
+                created_at=datetime.utcnow(),
+                completed_at=datetime.utcnow()
+            )
+            db.add(upload)
+            db.commit()
+            logger.info(f"Logged document upload: {doc_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error logging document upload: {e}")
+            db.rollback()
+            return False
+    
+    @staticmethod
+    def get_all_documents(db: Session, skip: int = 0, limit: int = 50) -> List[Dict]:
+        """Get all documents from database with admin info"""
+        try:
+            from ..database.models import DocumentUpload
+            
+            docs = db.query(DocumentUpload).offset(skip).limit(limit).all()
+            
+            result = []
+            for doc in docs:
+                # Get admin username
+                admin = db.query(User).filter(User.id == doc.uploaded_by_admin_id).first()
+                
+                result.append({
+                    'doc_id': doc.doc_id,
+                    'filename': doc.filename,
+                    'uploaded_by': admin.username if admin else "Unknown",
+                    'uploaded_at': doc.created_at.isoformat() if doc.created_at else None,
+                    'file_size': doc.file_size_bytes,
+                    'chunks': doc.chunk_count,
+                    'category': doc.category,
+                    'tags': doc.tags or [],
+                    'status': doc.status
+                })
+            
+            return result
+        except Exception as e:
+            logger.error(f"Error getting documents: {e}")
+            return []
+    
+    @staticmethod
+    def get_total_documents_count(db: Session) -> int:
+        """Get total count of documents"""
+        try:
+            from ..database.models import DocumentUpload
+            return db.query(DocumentUpload).count()
+        except Exception as e:
+            logger.error(f"Error getting document count: {e}")
+            return 0
+    
+    @staticmethod
+    def get_document_info(db: Session, doc_id: str) -> Dict:
+        """Get document info from database"""
+        try:
+            from ..database.models import DocumentUpload
+            
+            doc = db.query(DocumentUpload).filter(DocumentUpload.doc_id == doc_id).first()
+            if not doc:
+                return {}
+            
+            admin = db.query(User).filter(User.id == doc.uploaded_by_admin_id).first()
+            
+            return {
+                'doc_id': doc.doc_id,
+                'filename': doc.filename,
+                'uploaded_by': admin.username if admin else "Unknown",
+                'uploaded_at': doc.created_at.isoformat() if doc.created_at else None,
+                'file_size': doc.file_size_bytes,
+                'chunks': doc.chunk_count,
+                'category': doc.category,
+                'tags': doc.tags or [],
+                'status': doc.status
+            }
+        except Exception as e:
+            logger.error(f"Error getting document info: {e}")
+            return {}
+    
+    @staticmethod
+    def delete_document_record(db: Session, doc_id: str) -> bool:
+        """Delete document record from database"""
+        try:
+            from ..database.models import DocumentUpload
+            
+            db.query(DocumentUpload).filter(DocumentUpload.doc_id == doc_id).delete()
+            db.commit()
+            logger.info(f"Deleted document record: {doc_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting document record: {e}")
+            db.rollback()
             return False

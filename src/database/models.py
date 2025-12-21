@@ -72,3 +72,20 @@ class AuditLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     
     user = relationship("User", back_populates="audit_logs")
+class DocumentUpload(Base):
+    __tablename__ = "document_uploads"
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    doc_id = Column(String, nullable=False, index=True)
+    uploaded_by_admin_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    filename = Column(String, nullable=False)
+    file_size_bytes = Column(Integer, nullable=True)
+    chunk_count = Column(Integer, nullable=True)
+    extraction_time_ms = Column(Integer, nullable=True)
+    embedding_time_ms = Column(Integer, nullable=True)
+    status = Column(String, nullable=False, index=True)
+    error_message = Column(String, nullable=True)
+    tags = Column(JSON, nullable=True)
+    category = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    completed_at = Column(DateTime, nullable=True)
