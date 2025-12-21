@@ -64,6 +64,9 @@ async def add_security_headers(request, call_next):
 async def startup():
     init_db()
     _init_admin_user()
+    # Reset RAG router to ensure it gets fresh LLM instance
+    from ..services.rag_router import reset_rag_router
+    reset_rag_router()
     logger.info("Database initialized and admin user configured")
 
 def _init_admin_user():
@@ -379,17 +382,27 @@ class ChatRequest(BaseModel):
         }
 
 
+class ThinkingStep(BaseModel):
+    step: int
+    title: str
+    description: str
+    result: Optional[str] = None
+
 class ChatResponse(BaseModel):
     answer: str
     session_id: str
     message_id: str
+    thinking_steps: Optional[List[ThinkingStep]] = None
     
     class Config:
         json_schema_extra = {
             "example": {
                 "answer": "VNM là mã chứng khoán của Công ty Cổ phần Sữa Việt Nam (Vinamilk)...",
                 "session_id": "uuid-here",
-                "message_id": "uuid-here"
+                "message_id": "uuid-here",
+                "thinking_steps": [
+                    {"step": 1, "title": "🔄 Rewriting Query", "description": "Analyzing context...", "result": "Query rewritten"}
+                ]
             }
         }
 
@@ -531,7 +544,7 @@ async def chat(
         if request.use_rag:
             try:
                 from ..services.rag_router import get_rag_router
-                router = get_rag_router(agent_instance)
+                router = get_rag_router()  # Router gets LLM from factory, not agent
                 should_use_rag, routing_decision = await router.should_use_rag(
                     request.question,
                     conversation_history
@@ -559,7 +572,7 @@ async def chat(
                 rag_documents = None
         
         logger.info(f"Processing question for user {user_id}: {request.question[:50]}")
-        answer = await agent_instance.aquery(
+        answer, thinking_steps = await agent_instance.aquery(
             request.question, 
             user_id=user_id, 
             session_id=session_id,
@@ -574,10 +587,23 @@ async def chat(
         db.commit()
         db.refresh(assistant_msg)
         
+        # Convert thinking steps to Pydantic models with safe error handling
+        formatted_steps = []
+        try:
+            for step in thinking_steps:
+                if isinstance(step, dict):
+                    formatted_steps.append(ThinkingStep(**step))
+                else:
+                    formatted_steps.append(step)
+        except Exception as step_error:
+            logger.warning(f"Failed to serialize thinking steps: {step_error}")
+            formatted_steps = []
+        
         return ChatResponse(
             answer=answer,
             session_id=session_id,
-            message_id=assistant_msg.id
+            message_id=assistant_msg.id,
+            thinking_steps=formatted_steps if formatted_steps else None
         )
     except Exception as e:
         logger.error(f"Chat error: {e}")

@@ -90,29 +90,37 @@ class HistoricalDataInput(BaseModel):
 # Tool Implementations
 # ============================================
 
-@tool("get_company_info", args_schema=CompanyInfoInput)
+@tool("get_company_info")
 def get_company_info(ticker: str) -> str:
     """
     Lấy thông tin chi tiết về công ty theo mã chứng khoán.
     
-    Tool này trả về thông tin cơ bản về công ty như:
-    - Tên công ty
-    - Sàn giao dịch
-    - Ngành nghề
-    - Vốn hóa thị trường
-    - Website
-    
     Args:
-        ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG)
+        ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG, FPT, VIC)
         
     Returns:
         JSON string chứa thông tin công ty
-        
-    Example:
-        get_company_info(ticker="VNM")
     """
     try:
+        # Handle both direct string and wrapped dict arguments
+        if isinstance(ticker, dict):
+            if 'parameters' in ticker:
+                ticker = ticker['parameters'].get('ticker', '')
+            elif 'ticker' in ticker:
+                ticker = ticker['ticker']
+            else:
+                ticker = list(ticker.values())[0] if ticker else ''
+        
         # Validate and normalize ticker
+        ticker = str(ticker).upper().strip()
+        
+        # Validate ticker format
+        if not ticker or len(ticker) < 3:
+            return json.dumps({
+                "success": False,
+                "message": "Mã chứng khoán không hợp lệ. Vui lòng nhập mã 3-4 ký tự."
+            }, ensure_ascii=False)
+        
         ticker = ticker.upper().strip()
         
         # Initialize VnStock
@@ -166,7 +174,7 @@ def get_company_info(ticker: str) -> str:
         }, ensure_ascii=False)
 
 
-@tool("get_historical_data", args_schema=HistoricalDataInput)
+@tool("get_historical_data")
 def get_historical_data(
     ticker: str,
     start_date: Optional[str] = None,
@@ -176,13 +184,6 @@ def get_historical_data(
     """
     Lấy dữ liệu giá lịch sử (OHLCV) của mã chứng khoán.
     
-    Tool này trả về dữ liệu:
-    - Open: Giá mở cửa
-    - High: Giá cao nhất
-    - Low: Giá thấp nhất
-    - Close: Giá đóng cửa
-    - Volume: Khối lượng giao dịch
-    
     Args:
         ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG)
         start_date: Ngày bắt đầu format YYYY-MM-DD (VD: "2023-01-01")
@@ -191,13 +192,26 @@ def get_historical_data(
         
     Returns:
         JSON string chứa dữ liệu giá lịch sử và thống kê
-        
-    Example:
-        get_historical_data(ticker="VNM", start_date="2023-01-01", end_date="2023-06-30")
-        get_historical_data(ticker="VCB", period="3M")
     """
     try:
-        ticker = ticker.upper().strip()
+        # Handle both direct string and wrapped dict arguments
+        if isinstance(ticker, dict):
+            if 'parameters' in ticker:
+                params = ticker['parameters']
+                ticker = params.get('ticker', '')
+                start_date = params.get('start_date', start_date)
+                end_date = params.get('end_date', end_date)
+                period = params.get('period', period)
+            elif 'ticker' in ticker:
+                ticker = ticker['ticker']
+        
+        ticker = str(ticker).upper().strip()
+        
+        if not ticker or len(ticker) < 3:
+            return json.dumps({
+                "success": False,
+                "message": "Mã chứng khoán không hợp lệ."
+            }, ensure_ascii=False)
         
         # Calculate dates based on period if provided
         if period and not start_date:
@@ -280,28 +294,33 @@ def get_historical_data(
         }, ensure_ascii=False)
 
 
-@tool("get_shareholders", args_schema=CompanyInfoInput)
+@tool("get_shareholders")
 def get_shareholders(ticker: str) -> str:
     """
     Lấy danh sách cổ đông lớn của công ty.
-    
-    Tool này trả về thông tin về:
-    - Tên cổ đông
-    - Số lượng cổ phiếu nắm giữ
-    - Tỷ lệ sở hữu (%)
-    - Ngày cập nhật
     
     Args:
         ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG)
         
     Returns:
         JSON string chứa danh sách cổ đông
-        
-    Example:
-        get_shareholders(ticker="VNM")
     """
     try:
-        ticker = ticker.upper().strip()
+        # Handle both direct string and wrapped dict arguments
+        if isinstance(ticker, dict):
+            if 'parameters' in ticker:
+                ticker = ticker['parameters'].get('ticker', '')
+            elif 'ticker' in ticker:
+                ticker = ticker['ticker']
+        
+        ticker = str(ticker).upper().strip()
+        
+        if not ticker or len(ticker) < 3:
+            return json.dumps({
+                "success": False,
+                "message": "Mã chứng khoán không hợp lệ."
+            }, ensure_ascii=False)
+        
         stock = Vnstock().stock(symbol=ticker, source='VCI')
         shareholders = stock.company.shareholders()
         
@@ -343,29 +362,45 @@ def get_shareholders(ticker: str) -> str:
         }, ensure_ascii=False)
 
 
-@tool("get_officers", args_schema=CompanyInfoInput)
+@tool("get_officers")
 def get_officers(ticker: str) -> str:
     """
     Lấy danh sách ban lãnh đạo của công ty.
-    
-    Tool này trả về thông tin về:
-    - Tên thành viên
-    - Chức vụ
-    - Tỷ lệ sở hữu cổ phiếu (%)
-    - Số lượng cổ phiếu nắm giữ
     
     Args:
         ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG)
         
     Returns:
         JSON string chứa danh sách ban lãnh đạo
-        
-    Example:
-        get_officers(ticker="VNM")
     """
     try:
-        ticker = ticker.upper().strip()
-        stock = Vnstock().stock(symbol=ticker, source='VCI')
+        # Handle both direct string and wrapped dict arguments
+        if isinstance(ticker, dict):
+            if 'parameters' in ticker:
+                ticker = ticker['parameters'].get('ticker', '')
+            elif 'ticker' in ticker:
+                ticker = ticker['ticker']
+        
+        # Validate ticker input
+        if not ticker or not isinstance(ticker, str):
+            raise ValueError(f"Ticker phải là chuỗi không rỗng, nhận được: {type(ticker)} = {ticker}")
+        
+        ticker = str(ticker).upper().strip()
+        
+        if not ticker or len(ticker) < 3:
+            raise ValueError(f"Ticker phải có ít nhất 3 ký tự, nhận được: '{ticker}'")
+        
+        # Initialize VnStock
+        try:
+            stock = Vnstock().stock(symbol=ticker, source='VCI')
+        except Exception as e:
+            return json.dumps({
+                "success": False,
+                "message": f"Lỗi kết nối VnStock cho mã {ticker}: {str(e)}",
+                "data": None
+            }, ensure_ascii=False)
+        
+        # Get officers data
         officers = stock.company.officers()
         
         if officers is None or (isinstance(officers, pd.DataFrame) and officers.empty):
@@ -404,27 +439,33 @@ def get_officers(ticker: str) -> str:
         }, ensure_ascii=False)
 
 
-@tool("get_subsidiaries", args_schema=CompanyInfoInput)
+@tool("get_subsidiaries")
 def get_subsidiaries(ticker: str) -> str:
     """
     Lấy danh sách công ty con và công ty liên kết.
-    
-    Tool này trả về thông tin về:
-    - Tên công ty con/liên kết
-    - Tỷ lệ sở hữu (%)
-    - Loại hình (công ty con, công ty liên kết)
     
     Args:
         ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG)
         
     Returns:
-        JSON string chứa danh sách công ty con
-        
-    Example:
-        get_subsidiaries(ticker="VNM")
+        JSON string chứa danh sách công ty con/liên kết
     """
     try:
-        ticker = ticker.upper().strip()
+        # Handle both direct string and wrapped dict arguments
+        if isinstance(ticker, dict):
+            if 'parameters' in ticker:
+                ticker = ticker['parameters'].get('ticker', '')
+            elif 'ticker' in ticker:
+                ticker = ticker['ticker']
+        
+        ticker = str(ticker).upper().strip()
+        
+        if not ticker or len(ticker) < 3:
+            return json.dumps({
+                "success": False,
+                "message": "Mã chứng khoán không hợp lệ."
+            }, ensure_ascii=False)
+        
         stock = Vnstock().stock(symbol=ticker, source='VCI')
         subsidiaries = stock.company.subsidiaries()
         
@@ -463,29 +504,33 @@ def get_subsidiaries(ticker: str) -> str:
         }, ensure_ascii=False)
 
 
-@tool("get_company_events", args_schema=CompanyInfoInput)
+@tool("get_company_events")
 def get_company_events(ticker: str) -> str:
     """
     Lấy danh sách sự kiện của công ty (chia cổ tức, họp đại hội cổ đông, v.v.).
-    
-    Tool này trả về thông tin về:
-    - Tên sự kiện
-    - Ngày công bố
-    - Ngày thực hiện
-    - Tỷ lệ (nếu có)
-    - Giá trị (nếu có)
     
     Args:
         ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG)
         
     Returns:
         JSON string chứa danh sách sự kiện
-        
-    Example:
-        get_company_events(ticker="VNM")
     """
     try:
-        ticker = ticker.upper().strip()
+        # Handle both direct string and wrapped dict arguments
+        if isinstance(ticker, dict):
+            if 'parameters' in ticker:
+                ticker = ticker['parameters'].get('ticker', '')
+            elif 'ticker' in ticker:
+                ticker = ticker['ticker']
+        
+        ticker = str(ticker).upper().strip()
+        
+        if not ticker or len(ticker) < 3:
+            return json.dumps({
+                "success": False,
+                "message": "Mã chứng khoán không hợp lệ."
+            }, ensure_ascii=False)
+        
         stock = Vnstock().stock(symbol=ticker, source='VCI')
         events = stock.company.events()
         

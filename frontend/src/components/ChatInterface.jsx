@@ -22,6 +22,7 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh 
   const [pendingUserMessage, setPendingUserMessage] = useState(null);
   const [useRAG, setUseRAG] = useState(true);
   const [showDocumentPanel, setShowDocumentPanel] = useState(false);
+  const [thinkingSteps, setThinkingSteps] = useState([]);
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const textareaRef = useRef(null);
@@ -186,18 +187,33 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh 
       // Nếu CHỈ có text message (không upload file), gửi qua chat API
       // Hoặc nếu user có file context từ lần upload trước, gửi với context đó
       else if (userMessage) {
+        // Clear previous thinking steps
+        setThinkingSteps([]);
+
         const response = await axios.post("/api/chat", {
           question: userMessage,
+          session_id: conversationId,
+          use_rag: useRAG,
         });
 
-        // Add assistant response
+        console.log("Chat response:", response.data);
+        const { thinking_steps, answer } = response.data;
+        
+        console.log("Thinking steps:", thinking_steps);
+
+        // Add final answer with thinking steps
         setMessages((prev) => [
           ...prev,
           {
             role: "assistant",
-            content: response.data.answer,
+            content: answer,
+            isThinking: false,
+            thinkingSteps: thinking_steps || [],
           },
         ]);
+        
+        // Clear thinking steps from loading display
+        setThinkingSteps([]);
       }
     } catch (error) {
       console.error("Error:", error);
@@ -212,6 +228,7 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh 
       ]);
     } finally {
       setIsLoading(false);
+      setThinkingSteps([]);  // Clear thinking steps
       setActiveConversationId(null); // Clear active conversation when done thinking
       // Only refresh sidebar on conversation creation or cleanup
       // Don't refresh on every message to avoid excessive API calls
@@ -424,10 +441,25 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh 
                 <Bot className="w-5 h-5 text-white" />
               </div>
               <div className="flex-1 bg-slate-800/50 rounded-2xl rounded-tl-none p-4 border border-slate-700">
-                <div className="flex items-center gap-2 text-slate-400">
+                <div className="flex items-center gap-2 text-slate-400 mb-3">
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span className="text-sm">Đang suy nghĩ...</span>
                 </div>
+                
+                {/* Show thinking steps while loading */}
+                {thinkingSteps.length > 0 && (
+                  <div className="space-y-2 text-xs">
+                    {thinkingSteps.map((step, idx) => (
+                      <div key={idx} className="bg-slate-900/50 rounded p-2 border border-slate-600">
+                        <div className="font-semibold text-cyan-300">{step.title}</div>
+                        <div className="text-slate-400 text-xs mt-1">{step.description}</div>
+                        {step.result && (
+                          <div className="text-emerald-400 text-xs mt-1">✓ {step.result}</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}

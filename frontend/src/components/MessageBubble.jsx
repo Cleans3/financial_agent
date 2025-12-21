@@ -6,6 +6,8 @@ import {
   TrendingUp,
   TrendingDown,
   Minus,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
@@ -15,6 +17,7 @@ import remarkGfm from "remark-gfm";
 
 const MessageBubble = ({ message }) => {
   const [copied, setCopied] = useState(false);
+  const [showThinkingSteps, setShowThinkingSteps] = useState(message.thinkingSteps && message.thinkingSteps.length > 0); // Show by default if steps exist
   const isUser = message.role === "user";
 
   const copyToClipboard = (text) => {
@@ -82,6 +85,36 @@ const MessageBubble = ({ message }) => {
                 <Copy className="w-4 h-4 text-slate-400" />
               )}
             </button>
+          )}
+
+          {/* Thinking Steps (collapsible) */}
+          {message.thinkingSteps && message.thinkingSteps.length > 0 && (
+            <div className="mb-4 border-l-2 border-cyan-500">
+              <button
+                onClick={() => setShowThinkingSteps(!showThinkingSteps)}
+                className="flex items-center gap-2 text-cyan-400 hover:text-cyan-300 transition-colors text-sm font-medium p-2 pl-3"
+              >
+                {showThinkingSteps ? (
+                  <ChevronUp className="w-4 h-4" />
+                ) : (
+                  <ChevronDown className="w-4 h-4" />
+                )}
+                🧠 Reasoning Steps
+              </button>
+              {showThinkingSteps && (
+                <div className="pl-3 space-y-2 text-xs">
+                  {message.thinkingSteps.map((step, idx) => (
+                    <div key={idx} className="bg-slate-800/50 rounded p-2 border border-slate-700">
+                      <div className="font-semibold text-cyan-300">{step.title}</div>
+                      <div className="text-slate-400 text-xs mt-1">{step.description}</div>
+                      {step.result && (
+                        <div className="text-emerald-400 text-xs mt-1">✓ {step.result}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
 
           {/* Content */}

@@ -6,7 +6,6 @@ Analyzes queries to determine if document context is needed
 import json
 import logging
 from typing import Dict, List, Tuple, Optional
-from ..agent import FinancialAgent
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +13,8 @@ logger = logging.getLogger(__name__)
 class RAGRouter:
     """Routes queries to determine if RAG should be used"""
     
-    def __init__(self, agent: FinancialAgent):
-        self.agent = agent
+    def __init__(self, llm):
+        self.llm = llm
     
     async def should_use_rag(
         self,
@@ -33,6 +32,21 @@ class RAGRouter:
             Tuple of (should_use_rag: bool, reasoning: dict)
         """
         try:
+            # Quick heuristic check for common financial patterns
+            financial_keywords = ["giá", "price", "lịch sử", "history", "sma", "rsi", "cổ đông", "shareholders", 
+                                "thông tin công ty", "company info", "cổ phiếu", "stock", "chứng khoán", "securities"]
+            is_financial_query = any(keyword.lower() in query.lower() for keyword in financial_keywords)
+            
+            # If it's clearly a financial query, don't use RAG (use agent tools instead)
+            if is_financial_query:
+                return False, {
+                    "use_rag": False,
+                    "query_type": "financial_data",
+                    "confidence": 0.95,
+                    "reasoning": "Financial market data query - use agent tools"
+                }
+            
+            # For other queries, ask LLM
             # Build context for the router decision
             history_context = ""
             if conversation_history and len(conversation_history) > 0:
@@ -98,18 +112,23 @@ Guidelines:
             }
     
     def _get_router_decision(self, prompt: str) -> str:
-        """Get router decision from agent (sync method)"""
+        """Get router decision directly from LLM (sync method)"""
         try:
-            response = self.agent.query(prompt)
-            return response if isinstance(response, str) else str(response)
+            # Ensure we have an LLM with invoke method
+            if not hasattr(self.llm, 'invoke'):
+                logger.error(f"Router received non-LLM object: {type(self.llm).__name__}")
+                raise AttributeError(f"Expected LLM object with 'invoke' method, got {type(self.llm).__name__}")
+            
+            # Call LLM directly without agent system prompt
+            response = self.llm.invoke(prompt)
+            return response.content if hasattr(response, 'content') else str(response)
         except Exception as e:
-            logger.error(f"Router query failed: {e}")
+            logger.error(f"Router LLM call failed: {e}")
             raise
     
     def _parse_router_response(self, response: str) -> Dict:
         """Parse JSON response from router"""
         try:
-            # Extract JSON from response (handle markdown code blocks)
             response = response.strip()
             
             # Remove markdown code blocks if present
@@ -117,8 +136,15 @@ Guidelines:
                 response = response.split("```")[1]
                 if response.startswith("json"):
                     response = response[4:]
+                response = response.strip()
             
-            response = response.strip()
+            # Try to extract JSON from text that might contain explanatory text
+            # Look for JSON starting with { and ending with }
+            import re
+            json_match = re.search(r'\{[^{}]*"use_rag"[^{}]*\}', response, re.DOTALL)
+            if json_match:
+                response = json_match.group(0)
+                logger.info(f"Extracted JSON from wrapped response")
             
             # Parse JSON
             decision = json.loads(response)
@@ -161,11 +187,21 @@ Guidelines:
 _router: Optional[RAGRouter] = None
 
 
-def get_rag_router(agent: FinancialAgent = None) -> RAGRouter:
+def get_rag_router(llm=None) -> RAGRouter:
     """Get or create the RAG router instance"""
     global _router
-    if _router is None and agent is not None:
-        _router = RAGRouter(agent)
+    
+    # If llm is provided, always use it and update the cached router
+    if llm is not None:
+        _router = RAGRouter(llm)
+        return _router
+    
+    # Otherwise use or create cached router
+    if _router is None:
+        from ..llm import LLMFactory
+        llm = LLMFactory.get_llm()
+        _router = RAGRouter(llm)
+    
     return _router
 
 
