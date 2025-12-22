@@ -11,10 +11,12 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
+import json
 
 from .state import AgentState
 from ..llm import LLMFactory
 from ..tools import get_all_tools
+from ..utils.summarization import summarize_tool_result
 
 # Set up logging
 logging.basicConfig(
@@ -108,6 +110,18 @@ class FinancialAgent:
         message_count = len(state["messages"])
         logger.info(f"📬 Message count in state: {message_count}")
         
+        # Context window awareness: check token estimate
+        try:
+            from ..utils.summarization import estimate_message_tokens, should_compress_history
+            token_count = estimate_message_tokens(state["messages"])
+            logger.info(f"📊 Estimated tokens: {token_count}/6000")
+            
+            # If approaching context limit, log warning
+            if token_count > 5000:
+                logger.warning(f"⚠️ Context window approaching limit ({token_count} tokens)")
+        except Exception as e:
+            logger.debug(f"Token estimation skipped: {e}")
+        
         if state["messages"]:
             last_msg = state["messages"][-1]
             msg_type = type(last_msg).__name__
@@ -126,7 +140,7 @@ class FinancialAgent:
             # If the last message is a ToolMessage (tool result), don't call tools again
             # Just process the result and generate final answer
             if isinstance(last_msg, ToolMessage):
-                logger.info("\n🔧 TOOL MESSAGE DETECTED - Processing tool result")
+                logger.info("🔧 TOOL MESSAGE DETECTED - Processing tool result")
                 logger.info(f"   Tool name: {last_msg.tool_calls[0]['name'] if hasattr(last_msg, 'tool_calls') and last_msg.tool_calls else 'unknown'}")
                 logger.info(f"   Result length: {len(str(last_msg.content))} chars")
                 
@@ -142,6 +156,10 @@ class FinancialAgent:
                 
                 # Check if we have RAG context - if yes, merge results
                 has_rag = any("📚 Related Documents" in str(msg.content) for msg in state["messages"] if hasattr(msg, 'content'))
+                
+                # Summarization happens AFTER merging (if RAG present)
+                # For now, just prepare tool content without summarizing
+                tool_content = str(last_msg.content)
                 
                 if has_rag:
                     logger.info("   📊 RAG context detected + tool result - merging both sources")
@@ -162,15 +180,51 @@ class FinancialAgent:
                             if rag_docs:
                                 merged_answer = await self._merge_rag_and_tool_results(
                                     rag_docs, 
-                                    str(last_msg.content),
+                                    tool_content,  # Raw tool result, not summarized yet
                                     original_question
                                 )
+                                
+                                # NOW summarize the merged answer if needed
+                                if state.get("summarize_results", True) and len(merged_answer) > 500:
+                                    try:
+                                        from ..utils.summarization import summarize_tool_result
+                                        summary = summarize_tool_result({"content": merged_answer}, self.llm)
+                                        if summary:
+                                            logger.info(f"📌 Merged answer summarized: {summary[:80]}...")
+                                            merged_answer = summary  # Replace entire answer with summary
+                                    except Exception as e:
+                                        logger.warning(f"Merged answer summarization skipped: {e}")
+                                elif state.get("summarize_results") is False:
+                                    logger.info("📋 Answer summarization disabled by user")
+                                
                                 final_response = AIMessage(content=merged_answer)
                                 return {"messages": state["messages"] + [final_response]}
                         except Exception as e:
                             logger.warning(f"Result merging failed: {e}, will use tool result only")
                 
+                # No RAG context - summarize tool result directly
                 logger.info("   → Generating final answer based on tool output...")
+                
+                if state.get("summarize_results", True) and len(tool_content) > 500:
+                    try:
+                        from ..utils.summarization import summarize_tool_result
+                        summary = summarize_tool_result({"content": tool_content}, self.llm)
+                        if summary:
+                            logger.info(f"📌 Tool result summarized: {summary[:80]}...")
+                            tool_content = tool_content + f"\n\n📌 **Tóm tắt**: {summary}"
+                    except Exception as e:
+                        logger.warning(f"Tool result summarization skipped: {e}")
+                elif state.get("summarize_results") is False:
+                    logger.info("📋 Tool result summarization disabled by user")
+                
+                # Update last_msg with summarized content if changed
+                if tool_content != str(last_msg.content):
+                    last_msg = ToolMessage(
+                        tool_call_id=last_msg.tool_call_id if hasattr(last_msg, 'tool_call_id') else "",
+                        content=tool_content
+                    )
+                    state["messages"] = state["messages"][:-1] + [last_msg]
+                
                 
                 # IMPORTANT: Use a STRICT result-only prompt to ensure LLM ONLY displays results
                 # without explanations, code examples, or tool usage explanations
@@ -309,11 +363,11 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                 
                 # Check if we have RAG context - if yes, warn about unnecessary tool calls
                 if has_rag_context:
-                    logger.warning(f"\n⚠️  POTENTIAL ISSUE: Tools called despite RAG context present!")
+                    logger.warning(f"⚠️  POTENTIAL ISSUE: Tools called despite RAG context present!")
                     logger.warning(f"   Tools: {tool_names}")
                     logger.warning(f"   This might mean RAG context wasn't sufficient or system prompt wasn't followed")
                 
-                logger.info(f"\n✓ TOOL CALLS DETECTED: {tool_names}")
+                logger.info(f"✓ TOOL CALLS DETECTED: {tool_names}")
                 logger.info(f"   Tool count: {len(response.tool_calls)}")
                 for i, tc in enumerate(response.tool_calls, 1):
                     tool_name = tc.get('name', 'unknown')
@@ -356,6 +410,79 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         logger.info("✅ ROUTING DECISION: No tool calls → END")
         return "end"
     
+    def _tools_node(self, state: AgentState) -> AgentState:
+        """Custom tools node with answer-level summarization.
+        
+        Executes tools and summarizes results if >500 chars.
+        
+        Args:
+            state: Current agent state
+            
+        Returns:
+            Updated state with tool results and summaries
+        """
+        # Use standard ToolNode to execute
+        standard_tools = ToolNode(self.tools)
+        result_state = standard_tools.invoke(state)
+        
+        # Post-process: add summaries to tool results if long
+        if "messages" in result_state:
+            messages = list(result_state["messages"])
+            new_messages = []
+            
+            # Get tool names from previous AIMessage for context
+            tool_names_map = {}
+            for msg in messages:
+                if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        tool_id = tc.get('id', tc.get('tool_call_id', ''))
+                        tool_name = tc.get('name', 'unknown')
+                        if tool_id:
+                            tool_names_map[tool_id] = tool_name
+            
+            for msg in messages:
+                if isinstance(msg, ToolMessage):
+                    result_content = msg.content
+                    result_len = len(str(result_content))
+                    
+                    # Get tool name from mapping, fallback to message attribute or "unknown"
+                    tool_name = tool_names_map.get(msg.tool_call_id, getattr(msg, 'name', 'unknown'))
+                    
+                    # Check if user wants summarization
+                    should_summarize = state.get("summarize_results", True)
+                    
+                    # If tool result >500 chars and summarization enabled, add summary
+                    if should_summarize and result_len > 500:
+                        try:
+                            summary = summarize_tool_result({
+                                "data": result_content,
+                                "tool": tool_name
+                            }, self.llm)
+                            if summary:
+                                # Append summary to tool result
+                                enhanced_content = f"{result_content}\n\n📌 **Tóm tắt**: {summary}"
+                                new_messages.append(ToolMessage(
+                                    content=enhanced_content,
+                                    tool_call_id=msg.tool_call_id,
+                                    name=tool_name
+                                ))
+                            else:
+                                new_messages.append(msg)
+                        except Exception as e:
+                            logger.warning(f"Tool result summarization skipped: {e}")
+                            new_messages.append(msg)
+                    elif should_summarize is False:
+                        logger.info(f"📋 Tool result summarization disabled by user")
+                        new_messages.append(msg)
+                    else:
+                        new_messages.append(msg)
+                else:
+                    new_messages.append(msg)
+            
+            result_state["messages"] = new_messages
+        
+        return result_state
+    
     def _create_graph(self):
         """
         Tạo LangGraph workflow
@@ -370,7 +497,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         
         # Add nodes
         workflow.add_node("agent", self._agent_node)
-        workflow.add_node("tools", ToolNode(self.tools))
+        workflow.add_node("tools", self._tools_node)
         
         # Set entry point
         workflow.set_entry_point("agent")
@@ -394,7 +521,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         logger.info("LangGraph workflow created successfully!")
         return app
     
-    async def aquery(self, question: str, user_id: str = None, session_id: str = None, conversation_history: list = None, rag_documents: list = None, allow_tools: bool = True, use_rag: bool = True) -> tuple:
+    async def aquery(self, question: str, user_id: str = None, session_id: str = None, conversation_history: list = None, rag_documents: list = None, allow_tools: bool = True, use_rag: bool = True, summarize_results: bool = True) -> tuple:
         """
         Async query - Xử lý câu hỏi của người dùng with Agentic RAG
         
@@ -406,6 +533,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             rag_documents: List of RAG document chunks to include in context (optional)
             allow_tools: Whether to allow tool calls (default: True). Set False to disable tools
             use_rag: Whether to use RAG documents (default: True). Set False to disable RAG
+            summarize_results: Whether to summarize tool results (default: True)
             
         Returns:
             Tuple of (answer, thinking_steps)
@@ -496,9 +624,9 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             if rag_documents and len(rag_documents) > 0:
                 # Format RAG documents as context
                 rag_context = self._format_rag_context(rag_documents)
-                enhanced_question = f"{rewritten_question}\n\n📚 Related Documents:\n{rag_context}"
+                enhanced_question = f"{rewritten_question}\n📚 Related Documents:\n{rag_context}"
                 messages.append(HumanMessage(content=enhanced_question))
-                logger.info(f"\n📖 RAG CONTEXT INTEGRATION")
+                logger.info(f"📖 RAG CONTEXT INTEGRATION")
                 logger.info(f"   Attached {len(rag_documents)} relevant document(s) to question")
                 logger.info(f"   Enhanced question length: {len(enhanced_question)} chars")
                 logger.info(f"   RAG section preview:")
@@ -516,6 +644,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                 "messages": messages,
                 "allow_tools": allow_tools,
                 "has_rag_context": has_rag,
+                "summarize_results": summarize_results,
                 "_rag_documents": rag_documents if rag_documents else []
             }
             

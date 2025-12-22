@@ -414,15 +414,41 @@ class RAGService:
             results = []
             for scored_point in search_result.points:
                 payload = scored_point.payload
-                results.append({
-                    'text': payload.get('text', ''),
-                    'title': payload.get('title', ''),
-                    'source': payload.get('source', ''),
-                    'doc_id': payload.get('doc_id', ''),
-                    'chunk_id': payload.get('chunk_id', ''),
-                    'similarity': float(scored_point.score) if hasattr(scored_point, 'score') else 0.0,  # Cosine similarity 0-1
-                    'metadata': payload
-                })
+                text = payload.get('text', '')
+                
+                # Create RAG document summary with metrics extraction
+                try:
+                    from ..utils.summarization import create_rag_summary
+                    doc_summary = create_rag_summary(
+                        text,
+                        float(scored_point.score) if hasattr(scored_point, 'score') else 0.0
+                    )
+                    
+                    results.append({
+                        'text': doc_summary.get('full_text', text),
+                        'title': payload.get('title', ''),
+                        'source': payload.get('source', ''),
+                        'doc_id': payload.get('doc_id', ''),
+                        'chunk_id': payload.get('chunk_id', ''),
+                        'similarity': doc_summary.get('relevance_score', 0.0),
+                        'metrics': doc_summary.get('metrics_summary', {}),
+                        'summary': doc_summary.get('summary', None),
+                        'metadata': payload
+                    })
+                except Exception as sum_error:
+                    logger.warning(f"RAG summarization failed for doc {payload.get('doc_id')}: {sum_error}")
+                    # Fallback: return result without summary
+                    results.append({
+                        'text': text,
+                        'title': payload.get('title', ''),
+                        'source': payload.get('source', ''),
+                        'doc_id': payload.get('doc_id', ''),
+                        'chunk_id': payload.get('chunk_id', ''),
+                        'similarity': float(scored_point.score) if hasattr(scored_point, 'score') else 0.0,
+                        'metrics': {},
+                        'summary': None,
+                        'metadata': payload
+                    })
             
             logger.info(f"✓ Found {len(results)} relevant chunks")
             return results

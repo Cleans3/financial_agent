@@ -575,6 +575,61 @@ def get_company_events(ticker: str) -> str:
         }, ensure_ascii=False)
 
 
+def wrap_tool_result(
+    raw_result: str,
+    tool_name: str,
+    ticker: str,
+    llm = None,
+    reasoning: str = "Financial data retrieval"
+) -> dict:
+    """Wrap tool result with enhanced context: data, reasoning, summary.
+    
+    Args:
+        raw_result: Original JSON string result from tool
+        tool_name: Name of the tool called
+        ticker: Stock ticker
+        llm: Language model for summarization (optional)
+        reasoning: Why this tool was called
+        
+    Returns:
+        Enhanced dict with {data, reasoning, summary, metrics}
+    """
+    try:
+        from ..utils.summarization import create_enhanced_tool_result
+        
+        # Parse raw result
+        result_dict = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+        
+        # Create enhanced result (skip summary if no LLM provided)
+        if llm:
+            enhanced = create_enhanced_tool_result(
+                data=result_dict,
+                tool_name=tool_name,
+                llm=llm,
+                reasoning=reasoning,
+                raw_result=result_dict
+            )
+        else:
+            # Fallback without summarization
+            enhanced = {
+                "data": result_dict,
+                "tool": tool_name,
+                "reasoning": reasoning,
+                "summary": None,
+                "metrics": {}
+            }
+        return enhanced
+    except Exception as e:
+        # Fallback: return raw result on error
+        return {
+            "data": json.loads(raw_result) if isinstance(raw_result, str) else raw_result,
+            "tool": tool_name,
+            "reasoning": reasoning,
+            "summary": None,
+            "metrics": {}
+        }
+
+
 def get_vnstock_tools():
     """Get all VnStock tools for the agent"""
     return [

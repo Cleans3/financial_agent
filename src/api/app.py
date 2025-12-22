@@ -539,6 +539,47 @@ async def chat(
             for msg in history
         ]
         
+        # Session-level summarization: compress if >10 messages
+        if len(conversation_history) > 10:
+            try:
+                from ..utils.summarization import summarize_messages
+                from ..llm import LLMFactory
+                from langchain_core.messages import HumanMessage, AIMessage
+                
+                # Get main LLM for summarization
+                llm = LLMFactory.get_llm()
+                
+                # Convert to LangChain messages for summarization
+                lc_messages = [
+                    HumanMessage(content=msg["content"]) if msg["role"] == "user" 
+                    else AIMessage(content=msg["content"])
+                    for msg in conversation_history[:5]
+                ]
+                
+                # Summarize first 5 messages
+                summary = await summarize_messages(lc_messages, llm, num_messages_to_compress=5)
+                if summary:
+                    conversation_history = [
+                        {"role": "assistant", "content": f"📋 Previous context: {summary}"}
+                    ] + conversation_history[5:]
+                    logger.info(f"Session-level summarization applied for session {session_id}")
+            except Exception as sum_error:
+                logger.warning(f"Session summarization skipped: {sum_error}")
+                # Continue without summarization if it fails
+        
+        # Detect user summarization preference from query
+        summarize_results = True  # Default: auto-summarize if >500 chars
+        summary_keywords_force = ["summarize", "tl;dr", "tldr", "in short", "brief", "summary", "tóm tắt"]
+        summary_keywords_disable = ["no summary", "nosummary", "full detail", "all data", "no tl;dr", "verbose"]
+        
+        question_lower = request.question.lower()
+        if any(kw in question_lower for kw in summary_keywords_disable):
+            summarize_results = False
+            logger.info("User disabled result summarization")
+        elif any(kw in question_lower for kw in summary_keywords_force):
+            summarize_results = True
+            logger.info("User enabled result summarization")
+        
         # Detect if user explicitly requests RAG (e.g., "what is 1+1, use RAG")
         force_rag = False
         rag_keywords = ["use rag", "con rag", "sử dụng rag", "với rag", "kèm rag", "dùng rag"]
@@ -597,7 +638,8 @@ async def chat(
             conversation_history=conversation_history,
             rag_documents=rag_documents,
             allow_tools=request.allow_tools,
-            use_rag=should_use_rag
+            use_rag=should_use_rag,
+            summarize_results=summarize_results
         )
         
         user_msg = ChatMessage(session_id=session_id, role="user", content=request.question)
