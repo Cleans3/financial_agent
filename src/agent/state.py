@@ -13,5 +13,11 @@ class AgentState(TypedDict):
     
     Attributes:
         messages: Lịch sử conversation (HumanMessage, AIMessage, ToolMessage)
+        allow_tools: Whether tools are allowed in this query
+        has_rag_context: Whether RAG documents are attached
+        _rag_documents: Raw RAG documents for merging with tool results
     """
     messages: Annotated[Sequence[BaseMessage], add_messages]
+    allow_tools: bool = True
+    has_rag_context: bool = False
+    _rag_documents: list = []

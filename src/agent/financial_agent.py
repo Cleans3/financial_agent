@@ -100,19 +100,35 @@ class FinancialAgent:
         Returns:
             Updated state with LLM response
         """
-        logger.info("--- AGENT NODE: Analyzing query and selecting tools ---")
+        logger.info("="*20)
+        logger.info(">>> AGENT NODE INVOKED")
+        logger.info("="*20)
         
         # Log the incoming message state for debugging
+        message_count = len(state["messages"])
+        logger.info(f"📬 Message count in state: {message_count}")
+        
         if state["messages"]:
             last_msg = state["messages"][-1]
             msg_type = type(last_msg).__name__
-            msg_preview = str(last_msg.content)[:80] if hasattr(last_msg, 'content') else str(last_msg)[:80]
-            logger.info(f"Last message ({msg_type}): {msg_preview}")
+            msg_preview = str(last_msg.content)[:100] if hasattr(last_msg, 'content') else str(last_msg)[:100]
+            logger.info(f"📝 Last message type: {msg_type}")
+            logger.info(f"   Preview: {msg_preview}")
+            
+            # Count message types in state
+            msg_types_count = {
+                'HumanMessage': sum(1 for m in state["messages"] if isinstance(m, HumanMessage)),
+                'AIMessage': sum(1 for m in state["messages"] if isinstance(m, AIMessage)),
+                'ToolMessage': sum(1 for m in state["messages"] if isinstance(m, ToolMessage))
+            }
+            logger.info(f"📊 Message breakdown: {msg_types_count}")
             
             # If the last message is a ToolMessage (tool result), don't call tools again
             # Just process the result and generate final answer
             if isinstance(last_msg, ToolMessage):
-                logger.info("--- AGENT: Received tool result, generating final answer based on tool output ---")
+                logger.info("\n🔧 TOOL MESSAGE DETECTED - Processing tool result")
+                logger.info(f"   Tool name: {last_msg.tool_calls[0]['name'] if hasattr(last_msg, 'tool_calls') and last_msg.tool_calls else 'unknown'}")
+                logger.info(f"   Result length: {len(str(last_msg.content))} chars")
                 
                 # Check if the tool message contains an error
                 tool_content = str(last_msg.content).lower()
@@ -123,6 +139,38 @@ class FinancialAgent:
                         content=f"Xin lỗi, công cụ gặp lỗi: {last_msg.content}\n\nVui lòng thử lại với các tham số khác hoặc kiểm tra mã chứng khoán."
                     )
                     return {"messages": state["messages"] + [error_response]}
+                
+                # Check if we have RAG context - if yes, merge results
+                has_rag = any("📚 Related Documents" in str(msg.content) for msg in state["messages"] if hasattr(msg, 'content'))
+                
+                if has_rag:
+                    logger.info("   📊 RAG context detected + tool result - merging both sources")
+                    # Extract RAG documents from messages
+                    rag_docs_raw = None
+                    original_question = None
+                    for msg in state["messages"]:
+                        if hasattr(msg, 'content') and "📚 Related Documents" in str(msg.content):
+                            rag_docs_raw = str(msg.content)
+                            # Extract original question (before RAG section)
+                            original_question = rag_docs_raw.split("📚 Related Documents")[0].strip()
+                            break
+                    
+                    if rag_docs_raw and original_question:
+                        try:
+                            # Re-retrieve RAG documents if available from state
+                            rag_docs = state.get("_rag_documents", [])
+                            if rag_docs:
+                                merged_answer = await self._merge_rag_and_tool_results(
+                                    rag_docs, 
+                                    str(last_msg.content),
+                                    original_question
+                                )
+                                final_response = AIMessage(content=merged_answer)
+                                return {"messages": state["messages"] + [final_response]}
+                        except Exception as e:
+                            logger.warning(f"Result merging failed: {e}, will use tool result only")
+                
+                logger.info("   → Generating final answer based on tool output...")
                 
                 # IMPORTANT: Use a STRICT result-only prompt to ensure LLM ONLY displays results
                 # without explanations, code examples, or tool usage explanations
@@ -218,29 +266,61 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         
         # Prepare prompt with tool descriptions
         tool_descriptions = self._get_tool_descriptions()
-        # Avoid using str.format because the system prompt may contain braces
-        # (e.g. examples or conditional snippets). Use a safe replacement for
-        # the single placeholder {tool_descriptions} only.
         system_text = self.system_prompt.replace("{tool_descriptions}", tool_descriptions)
+        
+        logger.info("🤖 PREPARING LLM INVOCATION")
+        logger.info(f"   System prompt size: {len(system_text)} chars")
+        logger.info(f"   Tools available: {len(self.tools)}")
+        logger.info(f"   Tools allowed: {state.get('allow_tools', True)}")
+        
+        has_rag_context = any("📚 Related Documents" in str(msg.content) for msg in state["messages"] if hasattr(msg, 'content'))
+        if has_rag_context:
+            logger.info("   ✓ RAG context detected in messages")
+        else:
+            logger.info("   ✗ No RAG context in messages")
+        
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_text),
             MessagesPlaceholder(variable_name="messages"),
         ])
         
-        # Bind tools to LLM
-        llm_with_tools = self.llm.bind_tools(self.tools)
-        chain = prompt | llm_with_tools
+        allow_tools = state.get('allow_tools', True)
+        
+        if allow_tools and has_rag_context:
+            logger.info("   ℹ️  RAG present with tools enabled - will decide based on relevance")
+            llm_with_tools = self.llm.bind_tools(self.tools)
+            chain = prompt | llm_with_tools
+        elif allow_tools and not has_rag_context:
+            logger.info("   ✓ No RAG - tools available")
+            llm_with_tools = self.llm.bind_tools(self.tools)
+            chain = prompt | llm_with_tools
+        else:
+            logger.info("   🛑 Tools disabled - LLM will answer without tools")
+            chain = prompt | self.llm
         
         try:
+            logger.info("⚙️  INVOKING LLM...")
             # Invoke LLM
             response = await chain.ainvoke({"messages": state["messages"]})
             
             # Log tool calls if any
             if hasattr(response, 'tool_calls') and response.tool_calls:
                 tool_names = [tc.get('name', 'unknown') for tc in response.tool_calls]
-                logger.info(f"--- AGENT: Tool calls detected: {tool_names} ---")
+                
+                # Check if we have RAG context - if yes, warn about unnecessary tool calls
+                if has_rag_context:
+                    logger.warning(f"\n⚠️  POTENTIAL ISSUE: Tools called despite RAG context present!")
+                    logger.warning(f"   Tools: {tool_names}")
+                    logger.warning(f"   This might mean RAG context wasn't sufficient or system prompt wasn't followed")
+                
+                logger.info(f"\n✓ TOOL CALLS DETECTED: {tool_names}")
+                logger.info(f"   Tool count: {len(response.tool_calls)}")
+                for i, tc in enumerate(response.tool_calls, 1):
+                    tool_name = tc.get('name', 'unknown')
+                    logger.info(f"   [{i}] {tool_name}")
             else:
-                logger.info("--- AGENT: No tool calls, generating final answer ---")
+                logger.info(f"\n✓ NO TOOL CALLS")
+                logger.info("   → LLM decided to answer directly")
             
             return {"messages": state["messages"] + [response]}
             
@@ -264,15 +344,16 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         last_message = state["messages"][-1] if state["messages"] else None
         
         if not last_message:
-            logger.info("--- DECISION: No messages, ending ---")
+            logger.info("\n⛔ ROUTING DECISION: No messages → END")
             return "end"
         
         # Check if last message has tool calls
         if isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls:
-            logger.info("--- DECISION: Tool calls found, going to tools ---")
+            logger.info("🔄 ROUTING DECISION: Tool calls found → TOOLS NODE")
+            logger.info(f"   Tools to execute: {[tc.get('name', 'unknown') for tc in last_message.tool_calls]}")
             return "tools"
         
-        logger.info("--- DECISION: No tool calls, ending ---")
+        logger.info("✅ ROUTING DECISION: No tool calls → END")
         return "end"
     
     def _create_graph(self):
@@ -313,7 +394,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         logger.info("LangGraph workflow created successfully!")
         return app
     
-    async def aquery(self, question: str, user_id: str = None, session_id: str = None, conversation_history: list = None, rag_documents: list = None) -> tuple:
+    async def aquery(self, question: str, user_id: str = None, session_id: str = None, conversation_history: list = None, rag_documents: list = None, allow_tools: bool = True, use_rag: bool = True) -> tuple:
         """
         Async query - Xử lý câu hỏi của người dùng with Agentic RAG
         
@@ -323,6 +404,8 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             session_id: Session ID (optional, for context)
             conversation_history: List of previous messages (optional)
             rag_documents: List of RAG document chunks to include in context (optional)
+            allow_tools: Whether to allow tool calls (default: True). Set False to disable tools
+            use_rag: Whether to use RAG documents (default: True). Set False to disable RAG
             
         Returns:
             Tuple of (answer, thinking_steps)
@@ -332,6 +415,23 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         try:
             logger.info(f"Processing question for user {user_id} in session {session_id}: {question}")
             thinking_steps = []
+            
+            query_lower = question.lower()
+            force_no_tools = any(kw in query_lower for kw in ["no tool", "dont use tool", "without tool", "không dùng tool", "không sử dụng tool"])
+            force_tools = any(kw in query_lower for kw in ["use tool", "use this tool", "dùng tool", "sử dụng tool"])
+            force_no_rag = any(kw in query_lower for kw in ["no rag", "dont use rag", "without rag", "không dùng rag"])
+            
+            if force_no_tools:
+                allow_tools = False
+                logger.info("🚫 User explicitly disabled tools")
+            elif force_tools:
+                allow_tools = True
+                logger.info("✓ User explicitly enabled tools")
+            
+            if force_no_rag:
+                use_rag = False
+                rag_documents = None
+                logger.info("🚫 User explicitly disabled RAG")
             
             # Step 1: Rewrite query with context
             thinking_steps.append({
@@ -347,8 +447,8 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             else:
                 thinking_steps[-1]["result"] = "No context needed - using original query"
             
-            # Step 2: Filter RAG results if available
-            if rag_documents:
+            # Step 2: Filter RAG results if available and use_rag enabled
+            if rag_documents and use_rag:
                 thinking_steps.append({
                     "step": 2,
                     "title": "🔍 Filtering Search Results",
@@ -364,6 +464,9 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                 else:
                     thinking_steps[-1]["result"] = "No sufficiently relevant documents found, proceeding without RAG"
                     rag_documents = None
+            elif rag_documents and not use_rag:
+                logger.info("RAG disabled by user preference")
+                rag_documents = None
             
             # Step 3: Generate answer
             thinking_steps.append({
@@ -386,7 +489,8 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                         messages.append(AIMessage(content=content))
                     else:
                         messages.append(HumanMessage(content=content))
-                logger.info(f"Added {len(recent_history)} recent messages for context")
+                logger.info(f"📚 CONVERSATION CONTEXT")
+                logger.info(f"   Added {len(recent_history)} recent messages ({len(recent_history)//2} exchanges)")
             
             # Add current question (with RAG context if available and relevant)
             if rag_documents and len(rag_documents) > 0:
@@ -394,19 +498,35 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                 rag_context = self._format_rag_context(rag_documents)
                 enhanced_question = f"{rewritten_question}\n\n📚 Related Documents:\n{rag_context}"
                 messages.append(HumanMessage(content=enhanced_question))
-                logger.info(f"Enhanced question with {len(rag_documents)} relevant RAG documents")
+                logger.info(f"\n📖 RAG CONTEXT INTEGRATION")
+                logger.info(f"   Attached {len(rag_documents)} relevant document(s) to question")
+                logger.info(f"   Enhanced question length: {len(enhanced_question)} chars")
+                logger.info(f"   RAG section preview:")
+                for doc in rag_documents[:2]:  # Show first 2 docs
+                    logger.info(f"     • {doc.get('title', 'Unknown')} (relevance: {doc.get('similarity', 0):.1%})")
             else:
                 messages.append(HumanMessage(content=rewritten_question))
+                if rag_documents is not None:
+                    logger.info(f"\n⚠️  NO RAG DOCUMENTS")
+                    logger.info(f"   RAG was enabled but no documents matched relevance threshold")
             
-            # Create initial state with conversation context
+            has_rag = any("📚 Related Documents" in str(msg.content) for msg in messages if hasattr(msg, 'content'))
+            
             initial_state = {
-                "messages": messages
+                "messages": messages,
+                "allow_tools": allow_tools,
+                "has_rag_context": has_rag,
+                "_rag_documents": rag_documents if rag_documents else []
             }
             
-            # Run graph
+            logger.info("="*20)
+            logger.info("🚀 INVOKING LANGGRAPH WORKFLOW")
+            logger.info("="*20)
             result = await self.app.ainvoke(initial_state)
+            logger.info("="*20)
+            logger.info("✅ LANGGRAPH WORKFLOW COMPLETED")
+            logger.info("="*20)
             
-            # Extract tool calls from the graph result to show which tools were used
             tool_calls_made = []
             for msg in result.get("messages", []):
                 if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
@@ -438,7 +558,13 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                     thinking_steps[i]["step"] = i + 1
             
             # Get final answer
+            logger.info("="*20)
+            logger.info("📝 EXTRACTING FINAL ANSWER")
+            logger.info("="*20)
             final_message = result["messages"][-1]
+            final_msg_type = type(final_message).__name__
+            logger.info(f"Final message type: {final_msg_type}")
+            
             content = final_message.content if hasattr(final_message, 'content') else str(final_message)
             
             # Handle case where content is a list of content blocks
@@ -451,15 +577,20 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                     elif isinstance(block, str):
                         text_parts.append(block)
                 answer = ''.join(text_parts)
+                logger.info(f"Extracted from {len(content)} content blocks")
             else:
                 answer = str(content)
+            
+            logger.info(f"Answer length: {len(answer)} chars")
+            logger.info(f"Answer preview: {answer[:150]}...")
             
             # Clean up JSON responses - if answer looks like JSON, convert to natural text
             answer = self._clean_json_response(answer)
             
             thinking_steps[-1]["result"] = "✅ Answer generated successfully"
             
-            logger.info(f"Answer generated for user {user_id}: {answer[:100]}...")
+            logger.info(f"\n✅ ANSWER READY FOR USER {user_id}")
+            logger.info(f"   Final length: {len(answer)} chars")
             return answer, thinking_steps
             
         except Exception as e:
@@ -477,25 +608,76 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             documents: List of document chunks
             
         Returns:
-            Formatted context string
+            Formatted context string (content-focused, without filenames that trigger tools)
         """
         context_parts = []
         for i, doc in enumerate(documents, 1):
             title = doc.get('title', 'Unknown')
             text = doc.get('text', '')
             similarity = doc.get('similarity', 0)
-            source = doc.get('source', '')
+            # Note: Intentionally NOT including 'source' field to prevent LLM from 
+            # thinking it should call analyze_excel_file or other file tools
             
             # Limit text length
             text_preview = text[:300] + "..." if len(text) > 300 else text
             
             context_parts.append(
                 f"{i}. [{title}] (Relevance: {similarity:.1%})\n"
-                f"   Source: {source}\n"
                 f"   {text_preview}\n"
             )
         
         return "\n".join(context_parts)
+    
+    async def _merge_rag_and_tool_results(self, rag_docs: list, tool_result: str, original_question: str) -> str:
+        """
+        Merge RAG documents with tool execution results for comprehensive answer.
+        
+        Args:
+            rag_docs: List of RAG documents
+            tool_result: String result from tool execution
+            original_question: Original user question
+            
+        Returns:
+            Merged response combining both sources
+        """
+        from langchain_core.prompts import PromptTemplate
+        
+        rag_context = self._format_rag_context(rag_docs)
+        
+        merge_template = """Bạn vừa nhận được thông tin từ hai nguồn:
+
+1. NGHIÊN CỨU TÀI LIỆU (từ cơ sở dữ liệu):
+{rag_context}
+
+2. DỮ LIỆU THỜI GIAN THỰC (từ công cụ):
+{tool_result}
+
+NHIỆM VỤ: Viết câu trả lời cân bằng kết hợp cả hai nguồn:
+- Nêu phân tích từ tài liệu trước (bối cảnh, khái niệm, xu hướng)
+- Rồi đưa dữ liệu thời gian thực từ công cụ (số liệu cụ thể, chỉ số)
+- Kết luận: So sánh hay nhận xét từ cả hai
+
+Câu hỏi gốc: {original_question}
+
+Viết câu trả lời thực tế, không lặp lại "dữ liệu bao gồm..." hay "kết quả trả về..."
+"""
+        
+        prompt = PromptTemplate(
+            template=merge_template,
+            input_variables=["rag_context", "tool_result", "original_question"]
+        )
+        
+        chain = prompt | self.llm
+        response = await chain.ainvoke({
+            "rag_context": rag_context,
+            "tool_result": tool_result,
+            "original_question": original_question
+        })
+        
+        merged_answer = response.content if hasattr(response, 'content') else str(response)
+        logger.info(f"📊 MERGED RESULT: Combined {len(rag_docs)} RAG docs + tool result")
+        
+        return merged_answer
     
     def _clean_json_response(self, answer: str) -> str:
         """
@@ -855,7 +1037,13 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         Returns:
             Tuple of (rewritten_query, reasoning)
         """
+        logger.info("="*20)
+        logger.info("🔄 QUERY REWRITING PHASE")
+        logger.info("="*20)
+        logger.info(f"Original query: {question}")
+        
         if not conversation_history or len(conversation_history) == 0:
+            logger.info("⛔ No conversation history - using original query")
             return question, "No conversation history - using original query"
         
         # Check if query needs context (contains ambiguous references)
@@ -864,7 +1052,10 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         
         # If query is clear and specific, don't rewrite it
         if not has_ambiguous_ref:
+            logger.info("✓ Query is clear and specific - no rewriting needed")
             return question, "Query is clear and specific - no rewriting needed"
+        
+        logger.info("🤔 Ambiguous reference detected - attempting to clarify with context...")
         
         # Get last turn for context (user + assistant)
         recent_context = []
@@ -874,6 +1065,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             recent_context.append(f"{role}: {content}")
         
         context_str = "\n".join(recent_context)
+        logger.info(f"Context from history:\n{context_str}")
         
         rewrite_prompt = f"""Based on the previous message, clarify what the ambiguous reference refers to.
 
@@ -898,40 +1090,54 @@ Clarified Query:"""
                 rewrite_prompt
             )
             rewritten = response.content if hasattr(response, 'content') else str(response)
-            return rewritten.strip(), "Query clarified with context"
+            rewritten = rewritten.strip()
+            logger.info(f"✓ Query rewritten successfully:")
+            logger.info(f"  Before: {question}")
+            logger.info(f"  After:  {rewritten}")
+            return rewritten, "Query clarified with context"
         except Exception as e:
-            logger.warning(f"Query rewrite failed: {e}")
+            logger.warning(f"❌ Query rewrite failed: {e}")
+            logger.info("   → Proceeding with original query")
             return question, f"Rewrite skipped due to error"
     
-    def filter_rag_results(self, question: str, documents: list, min_relevance: float = 0.4) -> list:
+    def filter_rag_results(self, question: str, documents: list, min_relevance: float = 0.3) -> list:
         """
         Filter RAG results based on relevance to the question
         
         Args:
             question: User question
             documents: List of retrieved documents with similarity scores
-            min_relevance: Minimum relevance threshold (0-1)
+            min_relevance: Minimum relevance threshold (0-1). Default 0.3 (more lenient since Cosine is 0-1)
             
         Returns:
-            Filtered documents, or empty list if results are not relevant
+            Filtered documents, or all documents if any meet minimum threshold
         """
         if not documents:
             return []
         
+        # Log similarity scores for debugging
+        similarities = [doc.get('similarity', 0) for doc in documents]
+        logger.info(f"RAG document similarities: {[f'{s:.2f}' for s in similarities]}")
+        
         # Filter by similarity threshold
         filtered = [doc for doc in documents if doc.get('similarity', 0) >= min_relevance]
         
-        # Additional check: if top result similarity is very low, filter all
-        if documents and documents[0].get('similarity', 0) < 0.3:
-            logger.info(f"Top result similarity too low ({documents[0].get('similarity', 0):.1%}), excluding all documents")
+        # Additional check: if top result similarity is extremely low, exclude all
+        if documents and documents[0].get('similarity', 0) < 0.15:
+            logger.info(f"Top result similarity critically low ({documents[0].get('similarity', 0):.1%}), excluding all documents")
             return []
         
-        if len(filtered) > len(documents) * 0.5:  # Keep if at least 50% are relevant
-            logger.info(f"Filtered RAG results: {len(documents)} → {len(filtered)} relevant documents")
+        if filtered:  # If any documents meet the threshold, return them
+            logger.info(f"Filtered RAG results: {len(documents)} → {len(filtered)} relevant documents (threshold: {min_relevance:.2f})")
             return filtered
         else:
-            logger.info(f"Too few relevant results ({len(filtered)}/{len(documents)}), using all or none")
-            return [] if len(filtered) < 2 else filtered
+            # No documents meet threshold, but return top document anyway if it's reasonable
+            if documents[0].get('similarity', 0) >= 0.15:
+                logger.info(f"No documents above threshold ({min_relevance:.2f}), returning top document with similarity {documents[0].get('similarity', 0):.2f}")
+                return [documents[0]]
+            else:
+                logger.info(f"RAG results too low quality (top: {documents[0].get('similarity', 0):.2f}), skipping RAG")
+                return []
     
     def query(self, question: str, user_id: str = None, session_id: str = None, conversation_history: list = None, rag_documents: list = None) -> str:
         """

@@ -374,6 +374,7 @@ class ChatRequest(BaseModel):
     )
     session_id: Optional[str] = None
     use_rag: bool = True
+    allow_tools: bool = True
     
     class Config:
         json_schema_extra = {
@@ -594,7 +595,9 @@ async def chat(
             user_id=user_id, 
             session_id=session_id,
             conversation_history=conversation_history,
-            rag_documents=rag_documents
+            rag_documents=rag_documents,
+            allow_tools=request.allow_tools,
+            use_rag=should_use_rag
         )
         
         user_msg = ChatMessage(session_id=session_id, role="user", content=request.question)
@@ -734,7 +737,9 @@ async def chat_stream(
                 user_id=user_id, 
                 session_id=session_id,
                 conversation_history=conversation_history,
-                rag_documents=rag_documents
+                rag_documents=rag_documents,
+                allow_tools=request.allow_tools,
+                use_rag=should_use_rag
             )
             
             # Stream each thinking step as it was calculated
@@ -1893,25 +1898,15 @@ async def admin_upload_document(
         if not success:
             raise HTTPException(status_code=400, detail=message)
         
-        # Add to RAG
-        rag_service = get_rag_service()
-        text_content = doc_service.get_file_content(temp_path)
-        actual_chunks = rag_service.add_document(
-            doc_id,
-            text_content,
-            title or file.filename,
-            file.filename,
-            "admin"
-        )
-        
         # Log to database
+        # Note: process_file() already added the document to RAG and returned chunk_count
         AdminService.log_admin_document_upload(
             db,
             current_user.id,
             doc_id,
             file.filename,
             file.size,
-            actual_chunks,
+            chunk_count,
             category,
             tags_list
         )
@@ -1922,15 +1917,15 @@ async def admin_upload_document(
             "upload_document",
             "Document",
             doc_id,
-            f"Uploaded {actual_chunks} chunks"
+            f"Uploaded {chunk_count} chunks"
         )
         
         return {
             "success": True,
             "doc_id": doc_id,
             "filename": file.filename,
-            "chunks": actual_chunks,
-            "message": f"Document processed successfully ({actual_chunks} chunks)"
+            "chunks": chunk_count,
+            "message": f"Document processed successfully ({chunk_count} chunks)"
         }
     
     finally:

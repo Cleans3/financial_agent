@@ -110,7 +110,7 @@ class RAGService:
         
         self.qdrant_collection_name = "financial_documents"
         self._init_qdrant_collection()
-        self.next_point_id = 1  # Counter for unique IDs
+        self._init_next_point_id()  # Initialize next_point_id after collection exists
         
         logger.info("✓ RAG Service initialized successfully (Qdrant-First Architecture)")
     
@@ -147,6 +147,56 @@ class RAGService:
         except Exception as e:
             logger.error(f"Failed to initialize Qdrant collection: {e}")
             raise
+    
+    def _init_next_point_id(self):
+        """Initialize next_point_id by getting the maximum ID from existing points"""
+        try:
+            # Get collection info first
+            collection_info = self.qdrant_client.get_collection(self.qdrant_collection_name)
+            point_count = collection_info.points_count
+            logger.info(f"Collection has {point_count} points")
+            
+            if point_count == 0:
+                self.next_point_id = 1
+                logger.info("Collection is empty, initializing next_point_id to 1")
+                return
+            
+            # Scroll through all points to find the maximum ID
+            max_id = 0
+            points_scanned = 0
+            offset = None
+            
+            while True:
+                # scroll() returns a tuple: (points, next_page_offset)
+                scroll_result = self.qdrant_client.scroll(
+                    collection_name=self.qdrant_collection_name,
+                    offset=offset,
+                    limit=100,
+                    with_payload=False
+                )
+                
+                points, next_offset = scroll_result
+                
+                if not points:
+                    break
+                
+                points_scanned += len(points)
+                current_max = max(point.id for point in points)
+                max_id = max(max_id, current_max)
+                logger.debug(f"Scanned {points_scanned} points, current max ID: {max_id}")
+                
+                # Check if there are more points to scroll
+                if next_offset is None:
+                    break
+                    
+                offset = next_offset
+            
+            self.next_point_id = max_id + 1
+            logger.info(f"✓ Initialized next_point_id to {self.next_point_id} (scanned {points_scanned} points, max ID: {max_id})")
+        except Exception as e:
+            logger.error(f"Error determining max point ID: {e}")
+            self.next_point_id = 1
+            logger.info("Fallback: Starting next_point_id from 1")
     
     def chunk_text(self, text: str, metadata: Dict = None) -> List[Dict]:
         """
@@ -249,6 +299,7 @@ class RAGService:
         
         # Add to Qdrant
         points = []
+        point_ids = []
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
             chunk_id = f"{doc_id}_{i}"
             
@@ -264,15 +315,17 @@ class RAGService:
                 }
             )
             points.append(point)
+            point_ids.append(self.next_point_id)
             self.next_point_id += 1
         
         # Batch upsert to Qdrant (more efficient)
         try:
+            logger.info(f"Upserting {len(points)} points with IDs: {point_ids}")
             self.qdrant_client.upsert(
                 collection_name=self.qdrant_collection_name,
                 points=points
             )
-            logger.info(f"✓ Added {len(chunks)} chunks to Qdrant for document {doc_id}")
+            logger.info(f"✓ Added {len(chunks)} chunks to Qdrant for document {doc_id} with point IDs: {point_ids}")
         except Exception as e:
             logger.error(f"Failed to add document {doc_id} to Qdrant: {e}")
             raise
@@ -325,21 +378,33 @@ class RAGService:
             query_embedding = self.embedding_model.encode(query, convert_to_numpy=True)
             
             # Build filter if user_id provided (privacy isolation)
+            # Users can access their own documents + system documents (admin/empty user_id)
             query_filter = None
             if user_id:
-                query_filter = {
-                    "must": [
-                        {
-                            "key": "user_id",
-                            "match": {"value": user_id}
-                        }
+                query_filter = models.Filter(
+                    should=[
+                        # User's own documents
+                        models.FieldCondition(
+                            key="user_id",
+                            match=models.MatchValue(value=user_id)
+                        ),
+                        # System documents accessible to all users
+                        models.FieldCondition(
+                            key="user_id",
+                            match=models.MatchValue(value="admin")
+                        ),
+                        # Also check for empty user_id (system documents)
+                        models.FieldCondition(
+                            key="user_id",
+                            match=models.MatchValue(value="")
+                        )
                     ]
-                }
+                )
             
-            # Search Qdrant
-            search_result = self.qdrant_client.search(
+            # Search Qdrant using query_points (correct method for qdrant-client 1.16+)
+            search_result = self.qdrant_client.query_points(
                 collection_name=self.qdrant_collection_name,
-                query_vector=query_embedding.tolist(),
+                query=query_embedding.tolist(),
                 query_filter=query_filter,
                 limit=top_k,
                 with_payload=True
@@ -347,7 +412,7 @@ class RAGService:
             
             # Format results
             results = []
-            for scored_point in search_result:
+            for scored_point in search_result.points:
                 payload = scored_point.payload
                 results.append({
                     'text': payload.get('text', ''),
@@ -355,7 +420,7 @@ class RAGService:
                     'source': payload.get('source', ''),
                     'doc_id': payload.get('doc_id', ''),
                     'chunk_id': payload.get('chunk_id', ''),
-                    'similarity': float(scored_point.score),  # Cosine similarity 0-1
+                    'similarity': float(scored_point.score) if hasattr(scored_point, 'score') else 0.0,  # Cosine similarity 0-1
                     'metadata': payload
                 })
             
@@ -402,6 +467,21 @@ class RAGService:
         except Exception as e:
             logger.error(f"Failed to remove document {doc_id}: {e}")
             return False
+    
+    def delete_documents(self, doc_id: str) -> bool:
+        """
+        Delete document(s) from Qdrant vector database
+        Alias for remove_document() for API compatibility
+        Permanently removes all chunks/vectors associated with the document
+        
+        Args:
+            doc_id: Document ID to delete
+            
+        Returns:
+            Success status
+        """
+        logger.info(f"Hard deleting document {doc_id} from Qdrant vectorDB")
+        return self.remove_document(doc_id)
     
     def get_stats(self) -> Dict:
         """
