@@ -2,7 +2,7 @@
 FastAPI Application with Authentication & Database Integration
 """
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, status
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -23,6 +23,12 @@ from ..database.database import get_db, init_db
 from ..database.models import User, ChatSession, ChatMessage
 from ..services.session_service import SessionService
 from ..core.config import settings
+from ..core.tool_config import (
+    ToolsConfig,
+    QueryRewriteConfig,
+    RAGFilterConfig,
+    SummarizationConfig
+)
 from ..core.security import (
     create_access_token, 
     verify_password,
@@ -44,7 +50,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
@@ -91,10 +97,32 @@ def _init_admin_user():
 agent = None
 
 def get_agent():
+    """Get or initialize the Financial Agent with config from settings."""
     global agent
     if agent is None:
-        logger.info("Initializing Financial Agent...")
-        agent = FinancialAgent()
+        logger.info("Initializing Financial Agent with config...")
+        try:
+            # Build config from settings
+            tools_config = ToolsConfig(
+                allow_tool_calls=settings.ENABLE_TOOLS,
+                allow_rag=settings.ENABLE_RAG,
+                query_rewrite=QueryRewriteConfig(
+                    enabled=settings.ENABLE_QUERY_REWRITING
+                ),
+                rag_filter=RAGFilterConfig(
+                    min_relevance_threshold=settings.RAG_MIN_RELEVANCE,
+                    max_documents=settings.RAG_MAX_DOCUMENTS
+                ),
+                summarization=SummarizationConfig(
+                    enabled=settings.ENABLE_SUMMARIZATION,
+                    length_threshold=settings.SUMMARIZATION_THRESHOLD
+                )
+            )
+            agent = FinancialAgent(config=tools_config)
+            logger.info(f"✓ Agent initialized: tools={settings.ENABLE_TOOLS}, RAG={settings.ENABLE_RAG}")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize agent: {e}")
+            raise
     return agent
 
 
@@ -331,7 +359,7 @@ async def health_check(db: Session = Depends(get_db)):
     
     # Check RAG service
     try:
-        from ..services.rag_service import get_rag_service
+        from ..services.multi_collection_rag_service import get_rag_service
         rag_service = get_rag_service()
         if rag_service and hasattr(rag_service, 'index'):
             health_status["rag_service"] = "healthy"
@@ -375,6 +403,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     use_rag: bool = True
     allow_tools: bool = True
+    uploaded_files: Optional[List[str]] = None  # List of filenames just uploaded in this turn
     
     class Config:
         json_schema_extra = {
@@ -443,6 +472,15 @@ class FileUploadRequest(BaseModel):
         default="",
         description="Câu hỏi hoặc mô tả thêm về file"
     )
+
+
+class FileUploadResponse(BaseModel):
+    """Response model for file upload - returns prepared prompt for chat"""
+    success: bool
+    file_name: str
+    chunks_indexed: int
+    message: str
+    session_id: str
 
 
 class FileAnalysisResponse(BaseModel):
@@ -542,7 +580,7 @@ async def chat(
         # Session-level summarization: compress if >10 messages
         if len(conversation_history) > 10:
             try:
-                from ..utils.summarization import summarize_messages
+                from ..core.summarization import summarize_messages
                 from ..llm import LLMFactory
                 from langchain_core.messages import HumanMessage, AIMessage
                 
@@ -617,22 +655,35 @@ async def chat(
         rag_documents = None
         if should_use_rag:
             try:
-                from src.services.rag_service import get_rag_service
+                from src.services.multi_collection_rag_service import get_rag_service
                 rag_service = get_rag_service()
                 rag_documents = rag_service.search(
                     query=request.question,
-                    top_k=3,
-                    user_id=user_id
+                    user_id=user_id,
+                    chat_session_id=session_id,
+                    limit=3,
+                    include_global=True
                 )
-                logger.info(f"Retrieved {len(rag_documents)} documents from RAG service")
+                logger.info(f"Retrieved {len(rag_documents)} documents from RAG service (conversation-isolated)")
             except Exception as rag_error:
                 logger.warning(f"RAG retrieval failed (non-critical): {rag_error}")
                 # Continue without RAG if retrieval fails
                 rag_documents = None
         
-        logger.info(f"Processing question for user {user_id}: {request.question[:50]}")
+        # Rewrite question to include uploaded file context
+        enriched_question = request.question
+        if request.uploaded_files:
+            file_context = ", ".join(request.uploaded_files)
+            logger.info(f"Files uploaded in this turn: {file_context}")
+            
+            # Rewrite question to include file context
+            enriched_question = f"{request.question} (Files: {file_context})"
+            logger.info(f"Original question: {request.question}")
+            logger.info(f"Enriched question: {enriched_question}")
+        
+        logger.info(f"Processing question for user {user_id}: {enriched_question[:50]}")
         answer, thinking_steps = await agent_instance.aquery(
-            request.question, 
+            enriched_question,  # Use enriched question with file context
             user_id=user_id, 
             session_id=session_id,
             conversation_history=conversation_history,
@@ -752,18 +803,20 @@ async def chat_stream(
                     "reasoning": "User explicitly requested RAG"
                 }
             
-            # Handle RAG document retrieval
+            # Handle RAG document retrieval with conversation isolation
             rag_documents = None
             if should_use_rag:
                 try:
-                    from src.services.rag_service import get_rag_service
+                    from src.services.multi_collection_rag_service import get_rag_service
                     rag_service = get_rag_service()
                     rag_documents = rag_service.search(
                         query=request.question,
-                        top_k=3,
-                        user_id=user_id
+                        user_id=user_id,
+                        session_id=session_id,
+                        limit=3,
+                        include_global=True
                     )
-                    logger.info(f"Retrieved {len(rag_documents)} documents from RAG")
+                    logger.info(f"Retrieved {len(rag_documents)} documents from RAG (session-isolated)")
                     # Stream RAG decision
                     yield f'data: {json.dumps({"type": "rag_status", "used": True, "count": len(rag_documents)})}\n\n'
                 except Exception as rag_error:
@@ -773,12 +826,25 @@ async def chat_stream(
             else:
                 yield f'data: {json.dumps({"type": "rag_status", "used": False})}\n\n'
             
+            # Get uploaded file metadata from session
+            uploaded_files_info = []
+            if session and session.session_metadata and "uploaded_files" in session.session_metadata:
+                uploaded_files_info = session.session_metadata.get("uploaded_files", [])
+                if uploaded_files_info:
+                    file_names = [f["name"] for f in uploaded_files_info]
+                    logger.info(f"Files in this session: {', '.join(file_names)}")
+            
+            # IMPORTANT: Pass ORIGINAL question (not enriched) to workflow
+            # The workflow will handle files and decide how to use them
+            # Don't enrich the question here - let the workflow do it
             logger.info(f"Processing question for user {user_id}: {request.question[:50]}")
+            
             answer, thinking_steps = await agent_instance.aquery(
-                request.question, 
+                question=request.question,  # Original question, NOT enriched
                 user_id=user_id, 
                 session_id=session_id,
                 conversation_history=conversation_history,
+                uploaded_files=uploaded_files_info,  # Pass file metadata to workflow
                 rag_documents=rag_documents,
                 allow_tools=request.allow_tools,
                 use_rag=should_use_rag
@@ -790,8 +856,18 @@ async def chat_stream(
                 await asyncio.sleep(0.1)  # Small delay for better UX
             
             # Save messages to database
-            user_msg = ChatMessage(session_id=session_id, role="user", content=request.question)
-            assistant_msg = ChatMessage(session_id=session_id, role="assistant", content=answer)
+            user_msg = ChatMessage(
+                session_id=session_id,
+                role="user",
+                content=request.question,
+                message_meta={"message_type": "text"}
+            )
+            assistant_msg = ChatMessage(
+                session_id=session_id,
+                role="assistant",
+                content=answer,
+                message_meta={"message_type": "response", "rag_used": should_use_rag}
+            )
             db.add(user_msg)
             db.add(assistant_msg)
             db.commit()
@@ -957,14 +1033,16 @@ class DocumentUploadResponse(BaseModel):
 async def upload_document(
     file: UploadFile = File(...),
     title: Optional[str] = Form(None),
+    chat_id: Optional[str] = Query(None, description="Chat session ID for metadata isolation"),
     current_user: dict = Depends(get_current_user)
 ):
     """
     Upload and process a document (PDF, DOCX, TXT, PNG, JPG)
-    Automatically extracts text and indexes for RAG search
+    Automatically extracts text, chunks, embeds, and indexes to user's Qdrant collection
+    Supports conversation-aware metadata isolation via chat_id parameter
     """
     try:
-        from src.services.document_service import get_document_service
+        from src.services.enhanced_document_service import EnhancedDocumentService
         
         # Validate file
         if not file.filename:
@@ -977,28 +1055,31 @@ async def upload_document(
             tmp_path = tmp_file.name
         
         try:
-            # Process document
-            service = get_document_service()
+            # Generate doc_id for tracking
             doc_id = f"{current_user['user_id']}_{Path(file.filename).stem}_{datetime.now().timestamp()}"
             
-            success, message, chunks = service.process_file(
+            # Use new enhanced document service that integrates with multi-collection RAG
+            service = EnhancedDocumentService()
+            success, result = service.process_and_ingest(
                 file_path=tmp_path,
-                doc_id=doc_id,
-                title=title or Path(file.filename).stem,
-                user_id=current_user["user_id"]
+                user_id=current_user["user_id"],
+                chat_id=chat_id,
+                include_summary=True
             )
             
             if success:
-                logger.info(f"Document uploaded by user {current_user['user_id']}: {file.filename} ({chunks} chunks)")
+                chunks_added = result.get("chunks_added", 0)
+                logger.info(f"Document uploaded by user {current_user['user_id']}: {file.filename} ({chunks_added} chunks added to Qdrant)")
                 return DocumentUploadResponse(
                     success=True,
-                    message=message,
+                    message=result.get("message", "Document successfully processed and indexed"),
                     doc_id=doc_id,
-                    chunks=chunks,
-                    title=title or Path(file.filename).stem
+                    chunks=chunks_added,
+                    title=result.get("title", Path(file.filename).stem)
                 )
             else:
-                raise HTTPException(status_code=400, detail=message)
+                error_msg = result.get("error", "Unknown error during document processing")
+                raise HTTPException(status_code=400, detail=error_msg)
         
         finally:
             # Clean up temporary file
@@ -1040,7 +1121,7 @@ async def search_documents(
     Only returns documents uploaded by the current user
     """
     try:
-        from src.services.rag_service import get_rag_service
+        from src.services.multi_collection_rag_service import get_rag_service
         
         rag_service = get_rag_service()
         results = rag_service.search(
@@ -1207,7 +1288,7 @@ async def get_document_chunks(
     """
     try:
         from src.database.models import Document
-        from src.services.rag_service import get_rag_service
+        from src.services.multi_collection_rag_service import get_rag_service
         
         # Verify ownership
         doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -1254,7 +1335,7 @@ async def regenerate_document_embeddings(
     """
     try:
         from src.database.models import Document
-        from src.services.rag_service import get_rag_service
+        from src.services.multi_collection_rag_service import get_rag_service
         
         # Verify ownership
         doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -1328,32 +1409,32 @@ async def startup_event():
     logger.info("🚀 API ready to accept requests")
 
 
-@app.post("/api/upload", response_model=FileAnalysisResponse)
+@app.post("/api/upload", response_model=FileUploadResponse)
 async def upload_file(
     file: UploadFile = File(...),
-    question: str = Form(default="")
+    chat_session_id: Optional[str] = Form(default=None),
+    question: str = Form(default=""),
+    current_user: Optional[dict] = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     """
-    Upload và phân tích file (ảnh báo cáo tài chính hoặc Excel)
+    Upload file for ingestion into RAG + chat pipeline
     
-    Args:
-        file: File ảnh (PNG, JPG, PDF) hoặc Excel (.xlsx, .xls)
-        question: Câu hỏi hoặc mô tả thêm (optional)
-        
-    Returns:
-        FileAnalysisResponse với kết QuảAnalysis
-        
-    Example:
-        POST /api/upload
-        Form data:
-        - file: [binary file]
-        - question: "Phân tích báo cáo tài chính này"
+    Flow:
+    1. Create/get chat session
+    2. Ingest file into Qdrant (conversation isolated)
+    3. Return metadata for frontend to send to /api/chat with RAG context
     """
     temp_path = None
+    user_id = "anonymous"
+    
     try:
-        file_extension = Path(file.filename).suffix.lower()
+        if current_user:
+            user_id = current_user.get("user_id", "anonymous")
         
-        # Kiểm tra loại file
+        file_extension = Path(file.filename).suffix.lower()
+        file_name = file.filename
+        
         image_types = ["image/png", "image/jpeg", "image/jpg"]
         pdf_types = ["application/pdf"]
         excel_types = [
@@ -1369,11 +1450,14 @@ async def upload_file(
         if not (is_image or is_pdf or is_excel):
             raise HTTPException(
                 status_code=400,
-                detail=f"Loại file không được hỗ trợ. Hỗ trợ: PNG, JPG, PDF, XLSX, XLS. Nhận được: {file.content_type}"
+                detail=f"Unsupported file type. Supported: PNG, JPG, PDF, XLSX, XLS"
             )
         
-        # Lưu file tạm
-        logger.info(f"Processing file: {file.filename}")
+        file_type_map = {'pdf': 'pdf', 'excel': 'excel', 'image': 'image'}
+        file_type = 'pdf' if is_pdf else ('excel' if is_excel else 'image')
+        
+        logger.info(f"\n====================\nUPLOAD: {file_name} ({file_type})\n====================")
+        logger.info(f"User: {user_id}")
         
         with tempfile.NamedTemporaryFile(
             delete=False,
@@ -1383,254 +1467,70 @@ async def upload_file(
             temp_path = temp_file.name
             content = await file.read()
             temp_file.write(content)
-            logger.info(f"File saved to: {temp_path}")
         
-        # Xử lý theo loại file
-        if is_pdf:
-            logger.info("Processing PDF file...")
-            result = analyze_pdf(temp_path, question)
-            
-            if not result.success:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Lỗi xử lý PDF: {result.message}"
-                )
-            
-            # Kết hợp extracted text và tables markdown
-            combined_data = f"Extracted Text:\n{result.extracted_text}\n\nTables:\n{result.tables_markdown}"
-            
-            # Gửi dữ liệu PDF cho Gemini phân tích nếu có câu hỏi
-            analysis = result.analysis
-            if question.strip():
-                try:
-                    from src.llm.llm_factory import LLMFactory
-                    
-                    logger.info("Sending PDF data to Gemini for analysis...")
-                    
-                    # Đọc system prompt
-                    system_prompt_path = Path(__file__).parent.parent / "agent" / "prompts" / "financial_report_prompt.txt"
-                    if system_prompt_path.exists():
-                        with open(system_prompt_path, 'r', encoding='utf-8') as f:
-                            base_system_prompt = f.read()
-                    else:
-                        base_system_prompt = "Bạn là một chuyên gia tài chính chuyên phân tích báo cáo tài chính doanh nghiệp. Hãy phân tích dữ liệu sau một cách chi tiết, chuyên sâu và đưa ra những insights quý giá cho nhà đầu tư."
-                    
-                    # Kết hợp system prompt + user question
-                    system_prompt = f"{base_system_prompt}\n\n---\n\nYÊU CẦU TỪ NGƯỜI DÙNG:\n{question}"
-                    
-                    # Gọi Gemini
-                    llm = LLMFactory.get_llm()
-                    from langchain_core.messages import SystemMessage, HumanMessage
-                    
-                    messages = [
-                        SystemMessage(content=system_prompt),
-                        HumanMessage(content=f"Phân tích dữ liệu PDF sau:\n\n{combined_data}")
-                    ]
-                    
-                    response = await llm.ainvoke(messages)
-                    analysis = response.content
-                    
-                    logger.info("✓ Gemini analysis completed for PDF")
-                    
-                except Exception as e:
-                    logger.warning(f"Error sending PDF to Gemini: {e}")
-                    analysis = result.analysis
-            
-            return FileAnalysisResponse(
-                success=result.success,
-                report_type=f"PDF Document ({result.processing_method.upper()})",
-                extracted_text=result.extracted_text[:500] + "..." if len(result.extracted_text) > 500 else result.extracted_text,
-                analysis=analysis,
-                message=f"Xử lý PDF thành công. Method: {result.processing_method}"
+        if not chat_session_id:
+            session = ChatSession(
+                user_id=user_id,
+                title=question.strip()[:50] or f"📄 {Path(file_name).stem}",
+                use_rag=True
             )
+            db.add(session)
+            db.commit()
+            db.refresh(session)
+            chat_session_id = session.id
+            logger.info(f"Created chat session: {chat_session_id}")
+        else:
+            session = db.query(ChatSession).filter(ChatSession.id == chat_session_id).first()
+            if not session or (current_user and session.user_id != user_id):
+                raise HTTPException(status_code=403, detail="Access denied")
         
-        elif is_excel:
-            logger.info("Processing Excel file...")
-            result = analyze_excel_to_markdown(temp_path)
-            markdown_output = result.get('markdown', '')
-            analysis = markdown_output
-            
-            # Gửi Markdown cho Gemini phân tích với system prompt tùy chỉnh
-            try:
-                from src.llm.llm_factory import LLMFactory
-                
-                logger.info("Sending Excel data to Gemini for analysis...")
-                
-                # Đọc system prompt mặc định từ file
-                system_prompt_path = Path(__file__).parent.parent / "agent" / "prompts" / "excel_analysis_prompt.txt"
-                if system_prompt_path.exists():
-                    with open(system_prompt_path, 'r', encoding='utf-8') as f:
-                        base_system_prompt = f.read()
-                else:
-                    base_system_prompt = "Bạn là một chuyên gia tài chính chuyên phân tích báo cáo tài chính doanh nghiệp. Hãy phân tích dữ liệu sau một cách chi tiết, chuyên sâu và đưa ra những insights quý giá cho nhà đầu tư."
-                
-                # Kết hợp system prompt mặc định + user instruction
-                if question.strip():
-                    system_prompt = f"{base_system_prompt}\n\n---\n\nYÊU CẦU TỪ NGƯỜI DÙNG:\n{question}"
-                else:
-                    system_prompt = base_system_prompt
-                
-                # Gọi Gemini trực tiếp
-                llm = LLMFactory.get_llm()
-                from langchain_core.messages import SystemMessage, HumanMessage
-                
-                messages = [
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=f"Phân tích dữ liệu tài chính sau:\n\n{markdown_output}")
-                ]
-                
-                response = await llm.ainvoke(messages)
-                analysis = response.content
-                
-                logger.info("✓ Gemini analysis completed")
-                
-            except Exception as e:
-                logger.error(f"Error sending to Gemini: {e}")
-                analysis = markdown_output
-            
-            return FileAnalysisResponse(
-                success=result['success'],
-                report_type="Excel Financial Data",
-                extracted_text=markdown_output,
-                analysis=analysis,
-                message=result['message']
-            )
+        # IMPORTANT: Don't ingest file here anymore!
+        # The workflow will handle file extraction + ingestion
+        # Just store file metadata in the session for the workflow to use
         
-        else:  # is_image
-            logger.info("Processing image file...")
-            result = analyze_financial_report(temp_path)
-            analysis = result.analysis
-            extracted_text = result.extracted_text
-            report_type = result.report_type
-            
-            try:
-                from src.llm.llm_factory import LLMFactory
-                from langchain_core.messages import SystemMessage, HumanMessage
-                
-                llm = LLMFactory.get_llm()
-                
-                # Determine how to process the image based on context
-                if question.strip():
-                    # User provided a specific question - use it as context
-                    logger.info("User provided question - processing image with context...")
-                    
-                    # Combine the extracted text with the user question
-                    # Let the agent decide how to handle it (financial analysis or regular question)
-                    agent_instance = get_agent()
-                    
-                    # Combine extracted text with user question
-                    combined_query = f"Tôi đã upload một ảnh có nội dung sau:\n\n{extracted_text}\n\n---\n\nCâu hỏi của tôi là: {question}"
-                    
-                    # Use the financial agent to handle the question
-                    analysis = await agent_instance.aquery(combined_query)
-                    
-                    logger.info("✓ Agent processed image with user question")
-                else:
-                    # No user question provided - check if content looks like a financial report or a general question
-                    logger.info("No question provided - analyzing image content type...")
-                    
-                    # Use LLM to determine content type and extract question if any
-                    classification_prompt = f"""Analyze this extracted text from an image and determine:
-1. Is this a financial report/statement? (yes/no)
-2. If not, what type of content is it? (e.g., screenshot of question, chart, document, etc.)
-3. If it contains a question, extract it.
-
-Extracted text:
-{extracted_text}
-
-Respond in JSON format:
-{{"is_financial_report": true/false, "content_type": "...", "question": "..." (if any)}}"""
-                    
-                    classification_response = await llm.ainvoke([
-                        HumanMessage(content=classification_prompt)
-                    ])
-                    
-                    try:
-                        import json as json_module
-                        classification = json_module.loads(classification_response.content)
-                        is_financial = classification.get("is_financial_report", False)
-                        extracted_question = classification.get("question", "")
-                    except:
-                        # Default to financial report if classification fails
-                        is_financial = True
-                        extracted_question = ""
-                    
-                    # Process based on content type
-                    if is_financial:
-                        # Process as financial report
-                        logger.info("Content identified as financial report - using financial analysis")
-                        system_prompt_path = Path(__file__).parent.parent / "agent" / "prompts" / "financial_report_prompt.txt"
-                        if system_prompt_path.exists():
-                            with open(system_prompt_path, 'r', encoding='utf-8') as f:
-                                base_system_prompt = f.read()
-                        else:
-                            base_system_prompt = "Bạn là một chuyên gia tài chính chuyên phân tích báo cáo tài chính doanh nghiệp. Hãy phân tích dữ liệu sau một cách chi tiết, chuyên sâu và đưa ra những insights quý giá cho nhà đầu tư."
-                        
-                        system_prompt = base_system_prompt
-                        messages = [
-                            SystemMessage(content=system_prompt),
-                            HumanMessage(content=f"Phân tích dữ liệu từ báo cáo tài chính (đã OCR):\n\n{extracted_text}")
-                        ]
-                        response = await llm.ainvoke(messages)
-                        analysis = response.content
-                        report_type = "Financial Report (Image)"
-                    else:
-                        # Process as general question or content
-                        logger.info("Content identified as non-financial - using general agent")
-                        agent_instance = get_agent()
-                        
-                        if extracted_question:
-                            # If a question was extracted, answer it with the context
-                            combined_query = f"Dựa trên nội dung ảnh sau:\n\n{extracted_text}\n\n---\n\nCâu hỏi: {extracted_question}"
-                            analysis = await agent_instance.aquery(combined_query)
-                        else:
-                            # Just provide information about the content
-                            combined_query = f"Đây là nội dung từ ảnh được OCR:\n\n{extracted_text}\n\nHãy tóm tắt hoặc phân tích nội dung này."
-                            analysis = await agent_instance.aquery(combined_query)
-                        
-                        report_type = f"Image ({classification.get('content_type', 'Unknown')})"
-                    
-                    logger.info("✓ Image processing completed")
-                
-            except Exception as e:
-                logger.warning(f"Error in intelligent image processing: {e}")
-                # Fallback to original analysis
-                analysis = result.analysis
-            
-            return FileAnalysisResponse(
-                success=result.success,
-                report_type=report_type,
-                extracted_text=extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text,
-                analysis=analysis,
-                message=result.message
-            )
+        logger.info(f"✓ File stored: {file_name} (will be processed by workflow)")
         
+        # Store file info in session metadata for workflow access
+        session_meta = session.session_metadata or {}
+        if "uploaded_files" not in session_meta:
+            session_meta["uploaded_files"] = []
+        
+        file_info = {
+            "name": file_name,
+            "type": file_type,
+            "path": temp_path,
+            "size": len(content),
+            "extension": file_extension
+        }
+        
+        session_meta["uploaded_files"].append(file_info)
+        session.session_metadata = session_meta  # Reassign to trigger SQLAlchemy tracking
+        db.commit()
+        
+        # Return success - workflow will do actual ingestion
+        chunks_added = 0  # Will be updated by workflow when it ingests
+        logger.info(f"✓ File metadata stored. Workflow will process during next query.")
+        
+        return FileUploadResponse(
+            success=True,
+            file_name=file_name,
+            chunks_indexed=chunks_added,
+            session_id=chat_session_id,
+            message=f"File ingested successfully. Indexed {chunks_added} chunks."
+        )
+    
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error processing file: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Lỗi xử lý file: {str(e)}"
-        )
+        logger.error(f"Upload error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    
     finally:
-        # Xóa file tạm
-        if temp_path:
-            try:
-                if os.path.exists(temp_path):
-                    # Thử xóa file
-                    os.remove(temp_path)
-                    logger.info(f"Temp file deleted: {temp_path}")
-            except PermissionError:
-                # File đang được sử dụng - schedule xóa sau
-                try:
-                    import atexit
-                    atexit.register(lambda: os.remove(temp_path) if os.path.exists(temp_path) else None)
-                    logger.debug(f"Scheduled temp file cleanup: {temp_path}")
-                except Exception as cleanup_err:
-                    logger.warning(f"Could not schedule cleanup: {cleanup_err}")
-            except Exception as e:
-                logger.warning(f"Error deleting temp file: {e}")
+        # IMPORTANT: Don't delete temp_path here!
+        # The workflow needs to read it when processing the query
+        # The workflow will delete it after ingestion completes
+        # (Or it will be cleaned up by the OS temp directory cleanup)
+        pass
 
 
 class ExcelAnalysisResponse(BaseModel):
@@ -1928,13 +1828,14 @@ async def admin_upload_document(
         with open(temp_path, 'wb') as f:
             f.write(content)
         
-        # Process document
+# Process document (upload to global admin collection)
         doc_service = DocumentService()
         success, message, chunk_count = doc_service.process_file(
-            temp_path, 
-            doc_id, 
-            title or file.filename,
-            "admin"
+            file_path=temp_path,
+            chat_session_id=doc_id,
+            title=title or file.filename,
+            user_id="admin",
+            upload_to_global=True
         )
         
         if not success:

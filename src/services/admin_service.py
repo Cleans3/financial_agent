@@ -287,7 +287,7 @@ class AdminService:
             Dictionary with RAG statistics
         """
         try:
-            from src.services.rag_service import get_rag_service
+            from src.services.multi_collection_rag_service import get_rag_service
             
             rag_service = get_rag_service()
             rag_stats = rag_service.get_stats()

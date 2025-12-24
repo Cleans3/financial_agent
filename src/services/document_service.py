@@ -20,7 +20,7 @@ try:
 except ImportError:
     DocxDocument = None
 
-from src.services.rag_service import RAGService
+from src.services.multi_collection_rag_service import MultiCollectionRAGService
 
 # Set up logging
 logging.basicConfig(
@@ -54,29 +54,31 @@ class DocumentService:
     # File size limits (50MB)
     MAX_FILE_SIZE = 50 * 1024 * 1024
     
-    def __init__(self, rag_service: Optional[RAGService] = None):
+    def __init__(self, rag_service: Optional[MultiCollectionRAGService] = None):
         """
         Initialize Document Service
         
         Args:
-            rag_service: RAGService instance (optional, creates new if not provided)
+            rag_service: MultiCollectionRAGService instance (optional, creates new if not provided)
         """
-        self.rag_service = rag_service or RAGService()
+        self.rag_service = rag_service or MultiCollectionRAGService()
         logger.info("Document Service initialized")
     
     def process_file(self, 
                     file_path: str,
-                    doc_id: str,
+                    chat_session_id: str,
                     title: str = "",
-                    user_id: str = "") -> Tuple[bool, str, int]:
+                    user_id: str = "",
+                    upload_to_global: bool = False) -> Tuple[bool, str, int]:
         """
         Process a file and ingest into RAG service
         
         Args:
             file_path: Path to the file
-            doc_id: Unique document ID
+            chat_session_id: Chat session ID for conversation isolation (or doc_id for global uploads)
             title: Document title (auto-generated from filename if not provided)
             user_id: User who uploaded the document
+            upload_to_global: If True, upload to global admin collection (requires user_id="admin")
             
         Returns:
             Tuple of (success, message, chunks_added)
@@ -121,13 +123,22 @@ class DocumentService:
             logger.info(f"Extracted {len(text)} characters from {file_path.name}")
             
             # Add to RAG service
-            chunks_added = self.rag_service.add_document(
-                doc_id=doc_id,
-                text=text,
-                title=title,
-                source=file_path.name,
-                user_id=user_id
-            )
+            if upload_to_global:
+                # Admin: upload to global collection
+                chunks_added, summary = self.rag_service.add_document_to_global(
+                    text=text,
+                    title=title,
+                    source=file_path.name
+                )
+            else:
+                # Regular user: upload to personal collection with conversation isolation
+                chunks_added, summary = self.rag_service.add_document(
+                    user_id=user_id,
+                    chat_session_id=chat_session_id,
+                    text=text,
+                    title=title,
+                    source=file_path.name
+                )
             
             return True, f"Successfully processed {title} ({chunks_added} chunks)", chunks_added
             

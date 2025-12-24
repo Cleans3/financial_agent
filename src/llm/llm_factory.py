@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class LLMFactory:
     """
-    Factory để tạo LLM instance dựa trên cấu hình
+    Singleton factory để tạo LLM instance dựa trên cấu hình
     
     Hỗ trợ:
     - Ollama (local)
@@ -27,25 +27,33 @@ class LLMFactory:
     - LLM_MAX_TOKENS: max tokens (mặc định: 2048)
     """
     
+    _instance = None
+    _initialized = False
+    
     @staticmethod
     def get_llm() -> BaseChatModel:
         """
-        Tạo và trả về LLM instance dựa trên cấu hình
+        Singleton pattern: Return cached LLM instance or create new one
         
         Returns:
             BaseChatModel instance (ChatOllama hoặc ChatGoogleGenerativeAI)
         """
-        provider = LLMConfig.PROVIDER.lower()
+        if LLMFactory._instance is None:
+            provider = LLMConfig.PROVIDER.lower()
+            
+            logger.info(f"Initializing LLM with provider: {provider}")
+            
+            if provider == "gemini":
+                LLMFactory._instance = LLMFactory._get_gemini_llm()
+            elif provider == "ollama":
+                LLMFactory._instance = LLMFactory._get_ollama_llm()
+            else:
+                logger.warning(f"Unknown provider '{provider}', falling back to Gemini")
+                LLMFactory._instance = LLMFactory._get_gemini_llm()
+            
+            LLMFactory._initialized = True
         
-        logger.info(f"Initializing LLM with provider: {provider}")
-        
-        if provider == "gemini":
-            return LLMFactory._get_gemini_llm()
-        elif provider == "ollama":
-            return LLMFactory._get_ollama_llm()
-        else:
-            logger.warning(f"Unknown provider '{provider}', falling back to Gemini")
-            return LLMFactory._get_gemini_llm()
+        return LLMFactory._instance
     
     @staticmethod
     def _get_ollama_llm() -> BaseChatModel:
@@ -102,6 +110,10 @@ class LLMFactory:
         
         logger.info("Gemini LLM created successfully")
         return llm
-
-
-__all__ = ["LLMFactory"]
+    
+    @staticmethod
+    def reset():
+        """Reset singleton instance (for testing only)"""
+        LLMFactory._instance = None
+        LLMFactory._initialized = False
+        logger.info("LLM Factory reset")

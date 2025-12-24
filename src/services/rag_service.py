@@ -335,33 +335,24 @@ class RAGService:
     def search(self, 
                query: str,
                top_k: int = 5,
-               user_id: str = "") -> List[Dict]:
+               user_id: str = "",
+               session_id: Optional[str] = None,
+               include_global: bool = True) -> List[Dict]:
         """
         Search for relevant document chunks using Qdrant
+        Prioritizes user's personal collection, optionally falls back to global
         
         Args:
             query: Search query string
             top_k: Number of results to return (default: 5, max: 50)
             user_id: Filter by user ID (for privacy isolation)
+            session_id: Conversation session ID for isolation (optional)
+            include_global: Fall back to global docs if personal results empty
             
         Returns:
             List of relevant chunks with similarity scores, sorted by relevance
-            
-        Example:
-            results = rag_service.search("What is the revenue?", top_k=3, user_id="user123")
-            # Returns:
-            # [
-            #     {
-            #         'text': 'Revenue increased by 15%...',
-            #         'title': 'Financial Report Q4',
-            #         'similarity': 0.87,
-            #         'doc_id': 'doc-123',
-            #         'source': 'report.pdf'
-            #     },
-            #     ...
-            # ]
         """
-        logger.info(f"Searching Qdrant: '{query}' (top_k={top_k}, user_id={user_id})")
+        logger.info(f"Searching Qdrant: '{query}' (top_k={top_k}, user_id={user_id}, session_id={session_id})")
         
         if not self.qdrant_client:
             logger.error("Qdrant client not initialized")
@@ -377,42 +368,58 @@ class RAGService:
             # Generate query embedding
             query_embedding = self.embedding_model.encode(query, convert_to_numpy=True)
             
-            # Build filter if user_id provided (privacy isolation)
-            # Users can access their own documents + system documents (admin/empty user_id)
-            query_filter = None
+            # Build filter for personal collection search
+            personal_filter = None
             if user_id:
-                query_filter = models.Filter(
-                    should=[
-                        # User's own documents
+                must_conditions = [
+                    models.FieldCondition(
+                        key="user_id",
+                        match=models.MatchValue(value=user_id)
+                    )
+                ]
+                # If session_id provided, isolate to this conversation
+                if session_id:
+                    must_conditions.append(
                         models.FieldCondition(
-                            key="user_id",
-                            match=models.MatchValue(value=user_id)
-                        ),
-                        # System documents accessible to all users
-                        models.FieldCondition(
-                            key="user_id",
-                            match=models.MatchValue(value="admin")
-                        ),
-                        # Also check for empty user_id (system documents)
-                        models.FieldCondition(
-                            key="user_id",
-                            match=models.MatchValue(value="")
+                            key="chat_session_id",
+                            match=models.MatchValue(value=session_id)
                         )
-                    ]
-                )
+                    )
+                personal_filter = models.Filter(must=must_conditions)
             
-            # Search Qdrant using query_points (correct method for qdrant-client 1.16+)
-            search_result = self.qdrant_client.query_points(
+            # Search personal collection first
+            logger.info(f"Searching personal collection (session: {session_id})")
+            personal_result = self.qdrant_client.query_points(
                 collection_name=self.qdrant_collection_name,
                 query=query_embedding.tolist(),
-                query_filter=query_filter,
+                query_filter=personal_filter,
                 limit=top_k,
                 with_payload=True
             )
             
+            personal_results = personal_result.points if personal_result and personal_result.points else []
+            logger.info(f"Found {len(personal_results)} results in personal collection")
+            
+            # Fall back to global if no personal results and include_global=True
+            global_results = []
+            if not personal_results and include_global:
+                logger.info("No personal results found, searching global collection")
+                global_result = self.qdrant_client.query_points(
+                    collection_name=self.qdrant_collection_name,
+                    query=query_embedding.tolist(),
+                    query_filter=None,  # No user filter for global search
+                    limit=top_k,
+                    with_payload=True
+                )
+                global_results = global_result.points if global_result and global_result.points else []
+                logger.info(f"Found {len(global_results)} results in global collection")
+            
+            # Use personal results if available, otherwise global
+            search_points = personal_results if personal_results else global_results
+            
             # Format results
             results = []
-            for scored_point in search_result.points:
+            for scored_point in search_points:
                 payload = scored_point.payload
                 text = payload.get('text', '')
                 

@@ -272,7 +272,8 @@ def analyze_pdf(
 ) -> PDFAnalysisResult:
     """
     Phân tích file PDF báo cáo tài chính
-    Extracts text, tables, and uses Gemini for intelligent analysis
+    Extracts text, tables, and uses singleton LLM for analysis
+    Uses LLMFactory.get_llm() singleton to avoid reinitialization
     
     Args:
         pdf_path: Đường dẫn đến file PDF
@@ -283,12 +284,16 @@ def analyze_pdf(
         PDFAnalysisResult chứa text, tables, analysis, và processing method
     """
     try:
-        logger.info(f"Analyzing PDF: {pdf_path}")
+        logger.info(f"====================\nPDF ANALYSIS INITIATED\n====================")
+        logger.info(f"PDF File: {pdf_path}")
+        logger.info(f"Question: {question if question else '(none)'}")
         
         # Bước 1: Trích xuất text và bảng
+        logger.info("[Step 1/4] Extracting text and tables from PDF...")
         extraction_result = extract_text_from_pdf(pdf_path)
         
         if not extraction_result.success:
+            logger.error(f"PDF extraction failed: {extraction_result.message}")
             return PDFAnalysisResult(
                 success=False,
                 file_name=extraction_result.file_name,
@@ -300,37 +305,40 @@ def analyze_pdf(
                 message=extraction_result.message
             )
         
+        logger.info(f"✓ Extracted text from {extraction_result.total_pages} pages (has_text: {extraction_result.has_text})")
+        
         # Bước 2: Chuyển bảng sang Markdown
+        logger.info("[Step 2/4] Converting tables to markdown...")
         tables_markdown = convert_tables_to_markdown(extraction_result.tables)
+        logger.info(f"✓ Converted {len(extraction_result.tables)} tables")
         
         # Bước 3: Kết hợp tất cả dữ liệu
+        logger.info("[Step 3/4] Combining extracted content...")
         combined_text = extraction_result.extracted_text
         if tables_markdown:
             combined_text += f"\n\n## Các bảng trong PDF\n\n{tables_markdown}"
+        logger.info(f"✓ Combined text length: {len(combined_text)} chars")
         
-        # Bước 4: Gửi đến Gemini để phân tích (nếu có API key)
+        # Bước 4: Sử dụng LLM Factory (singleton) để phân tích
+        logger.info("[Step 4/4] Analyzing with LLM (using singleton instance)...")
         analysis_result = combined_text  # Default fallback
         
         try:
-            api_key = gemini_api_key or os.getenv("GOOGLE_API_KEY")
-            if api_key:
-                logger.info("Sending PDF content to Gemini for analysis...")
-                
-                # Load prompt chuyên biệt
-                prompt_path = Path(__file__).parent.parent / "agent" / "prompts" / "financial_report_prompt.txt"
-                if prompt_path.exists():
-                    with open(prompt_path, 'r', encoding='utf-8') as f:
-                        system_prompt = f.read()
-                else:
-                    system_prompt = "Bạn là chuyên gia phân tích báo cáo tài chính. Phân tích text và bảng dưới đây."
-                
-                llm = ChatGoogleGenerativeAI(
-                    api_key=api_key,
-                    model=LLMConfig.GEMINI_MODEL,
-                    temperature=LLMConfig.TEMPERATURE
-                )
-                
-                analysis_prompt = f"""
+            from src.llm.llm_factory import LLMFactory
+            
+            # Use singleton LLM instance - NOT creating new one
+            llm = LLMFactory.get_llm()
+            logger.info(f"✓ Using singleton LLM instance for PDF analysis")
+            
+            # Load prompt chuyên biệt
+            prompt_path = Path(__file__).parent.parent / "agent" / "prompts" / "financial_report_prompt.txt"
+            if prompt_path.exists():
+                with open(prompt_path, 'r', encoding='utf-8') as f:
+                    system_prompt = f.read()
+            else:
+                system_prompt = "Bạn là chuyên gia phân tích báo cáo tài chính. Phân tích text và bảng dưới đây."
+            
+            analysis_prompt = f"""
 {system_prompt}
 
 TÀI LIỆU PDF ĐÃ ĐƯỢC TRÍCH XUẤT:
@@ -348,14 +356,14 @@ NHIỆM VỤ:
 
 Vui lòng trả lời chi tiết và có cấu trúc rõ ràng.
 """
-                
-                message = llm.invoke(analysis_prompt)
-                analysis_result = message.content
-                logger.info("Gemini analysis completed successfully")
+            
+            message = llm.invoke(analysis_prompt)
+            analysis_result = message.content
+            logger.info("PDF analysis completed successfully with LLM factory")
         
         except Exception as e:
-            logger.warning(f"Gemini analysis failed, using raw extraction: {e}")
-            # Fallback to extracted text if Gemini fails
+            logger.warning(f"LLM analysis failed, using raw extraction: {e}")
+            # Fallback to extracted text if LLM fails
             pass
         
         logger.info("PDF analysis completed")

@@ -88,13 +88,95 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh,
     scrollToBottom();
   }, [messages]);
 
-  // Save messages to conversation storage
   useEffect(() => {
     if (conversationId && messages.length > 0) {
       conversationService.saveMessages(conversationId, messages);
-      // Don't refresh sidebar on every message save - only on conversation creation/deletion
     }
   }, [messages, conversationId]);
+
+  const sendChatMessage = async (question, sessionId, uploadedFileNames = []) => {
+    setThinkingSteps([]);
+    const token = localStorage.getItem('token');
+    
+    try {
+      const response = await fetch("/api/chat-stream", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          question,
+          session_id: sessionId,
+          use_rag: useRAG,
+          uploaded_files: uploadedFileNames.length > 0 ? uploadedFileNames : null,  // Include file names
+        }),
+      });
+
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let finalAnswer = "";
+      let collectedSteps = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split("\n");
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              
+              if (data.type === "rag_status") {
+                const ragStep = {
+                  step: 0,
+                  title: data.used ? "🗂️ RAG Retrieval" : "🗂️ RAG Check",
+                  description: data.used ? "Searching documents..." : "Checking if retrieval needed...",
+                  result: data.used ? `Retrieved ${data.count} documents` : "Using knowledge base",
+                };
+                collectedSteps.push(ragStep);
+                setThinkingSteps((prev) => [...prev, ragStep]);
+              } 
+              else if (data.type === "thinking_step") {
+                collectedSteps.push(data.step);
+                setThinkingSteps((prev) => [...prev, data.step]);
+              } 
+              else if (data.type === "answer") {
+                finalAnswer = data.content;
+              } 
+              else if (data.type === "error") {
+                throw new Error(data.message);
+              }
+            } catch (e) {
+              // Skip parsing errors
+            }
+          }
+        }
+      }
+
+      if (finalAnswer) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: finalAnswer,
+            thinkingSteps: collectedSteps,
+          },
+        ]);
+      }
+    } catch (error) {
+      console.error("Chat error:", error);
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: `Error: ${error.message}` },
+      ]);
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -105,16 +187,14 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh,
     const filesToProcess = [...uploadedFiles];
     setUploadedFiles([]);
 
-    // Create a new conversation if none exists
     let currentConvId = conversationId;
     if (!currentConvId) {
       try {
         const newConv = await conversationService.createConversation(userMessage || "Phân tích file");
         currentConvId = newConv.id;
-        // Set pending message before switching conversation
         setPendingUserMessage(userMessage || "Phân tích file");
         onConversationChange?.(currentConvId);
-        return; // Exit early - the conversation change will trigger the message to be added via useEffect
+        return;
       } catch (error) {
         console.error('Error creating conversation:', error);
         setMessages((prev) => [...prev, { 
@@ -125,196 +205,82 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh,
       }
     }
 
-    // Mark this conversation as the active one (agent is thinking here)
     setActiveConversationId(currentConvId);
-
-    // Add user message (only for existing conversations)
-    setMessages((prev) => [...prev, { role: "user", content: userMessage || "Phân tích file" }]);
     setIsLoading(true);
-    
-    // Notify parent that agent is thinking
     onAgentThinkingChange?.(true);
 
     try {
-      // If files are uploaded, process them
+      let finalPrompt = userMessage;
+      let fileNamesForContext = [];  // Track uploaded files to pass to backend
+      
+      // If files are attached, build the prompt now
       if (filesToProcess.length > 0) {
-        for (const file of filesToProcess) {
+        const fileNames = filesToProcess.map(f => f.name).join(", ");
+        fileNamesForContext = filesToProcess.map(f => f.name);  // Store file names
+        
+        if (!userMessage) {
+          // Auto-generate default prompt for file-only uploads
+          finalPrompt = `Phân tích và tóm tắt file sau: ${fileNames}`;
+        }
+        
+        // Add user message to UI immediately (before ingestion)
+        setMessages((prev) => [...prev, { role: "user", content: finalPrompt }]);
+        
+        // Ingest files in parallel (don't wait for each one)
+        const uploadPromises = filesToProcess.map(async (file) => {
           try {
-            // Convert data URL to blob
             const response = await fetch(file.data);
             const blob = await response.blob();
-
-            // Create FormData
             const formData = new FormData();
             formData.append("file", blob, file.name);
-            if (userMessage) {
-              formData.append("question", userMessage);
-            }
+            formData.append("chat_session_id", currentConvId);
+            // Don't pass question here - it's already in the prompt
 
-            // Upload and analyze
-            const analysisResponse = await axios.post("/api/upload", formData, {
-              headers: {
-                "Content-Type": "multipart/form-data",
-              },
+            const uploadResponse = await axios.post("/api/upload", formData, {
+              headers: { "Content-Type": "multipart/form-data" },
             });
-
-            // Display analysis result
-            const analysisMessage = analysisResponse.data.analysis || analysisResponse.data.message;
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: "assistant",
-                content: `📄 **${file.name}**\n\n${analysisMessage}`,
-              },
-            ]);
             
-            // Lưu file context để dùng cho câu hỏi tiếp theo
-            setFileContext({
-              fileName: file.name,
-              analysis: analysisMessage
-            });
+            console.log(`✓ File "${file.name}" ingested: ${uploadResponse.data.chunks_indexed} chunks`);
+            setFileContext({ fileName: file.name });
+            return uploadResponse.data;
           } catch (error) {
-            console.error("Error analyzing file:", error);
+            console.error("Error uploading file:", error);
             setMessages((prev) => [
               ...prev,
               {
                 role: "assistant",
-                content: `❌ Lỗi phân tích file "${file.name}": ${
+                content: `❌ Error uploading "${file.name}": ${
                   error.response?.data?.detail || error.message
                 }`,
               },
             ]);
+            return null;
           }
-        }
+        });
+        
+        // Wait for all uploads to complete, then send chat
+        await Promise.all(uploadPromises);
       } 
-      // Nếu CHỈ có text message (không upload file), gửi qua chat API
-      // Hoặc nếu user có file context từ lần upload trước, gửi với context đó
       else if (userMessage) {
-        // Clear previous thinking steps
-        setThinkingSteps([]);
-
-        try {
-          // Use streaming API for real-time thinking steps
-          const token = localStorage.getItem('token');
-          const response = await fetch("/api/chat-stream", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${token}`,
-            },
-            body: JSON.stringify({
-              question: userMessage,
-              session_id: conversationId,
-              use_rag: useRAG,
-            }),
-          });
-
-          if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-          }
-
-          const reader = response.body.getReader();
-          const decoder = new TextDecoder();
-          let finalAnswer = "";
-          let finalMessageId = "";
-          let sessionId = conversationId;
-          let collectedSteps = []; // Collect steps locally
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split("\n");
-
-            for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                try {
-                  const data = JSON.parse(line.slice(6));
-
-                  if (data.type === "session_id") {
-                    sessionId = data.session_id;
-                  } else if (data.type === "rag_status") {
-                    // Add RAG status to thinking steps
-                    if (data.used) {
-                      const ragStep = {
-                        step: 0,
-                        title: "🗂️ RAG Retrieval",
-                        description: `Searching documents for relevant information...`,
-                        result: `Retrieved ${data.count} relevant documents`,
-                      };
-                      collectedSteps.push(ragStep);
-                      setThinkingSteps((prev) => [...prev, ragStep]);
-                    } else {
-                      const ragStep = {
-                        step: 0,
-                        title: "🗂️ RAG Check",
-                        description: "Deciding if document retrieval is needed...",
-                        result: "Using knowledge base only - no documents needed",
-                      };
-                      collectedSteps.push(ragStep);
-                      setThinkingSteps((prev) => [...prev, ragStep]);
-                    }
-                  } else if (data.type === "thinking_step") {
-                    // Stream thinking steps in real-time
-                    collectedSteps.push(data.step);
-                    setThinkingSteps((prev) => [...prev, data.step]);
-                  } else if (data.type === "answer") {
-                    finalAnswer = data.content;
-                    finalMessageId = data.message_id;
-                  } else if (data.type === "error") {
-                    throw new Error(data.message);
-                  }
-                } catch (e) {
-                  // Skip non-JSON lines or parse errors
-                }
-              }
-            }
-          }
-
-          // Replace loading message with final answer
-          if (finalAnswer) {
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: "assistant",
-                content: finalAnswer,
-                isThinking: false,
-                thinkingSteps: collectedSteps,
-              },
-            ]);
-          }
-
-          setThinkingSteps([]);
-        } catch (error) {
-          console.error("Error:", error);
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: "assistant",
-              content: `Xin lỗi, đã có lỗi xảy ra: ${error.message}`,
-            },
-          ]);
-        }
+        // Text-only message - no files
+        setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
+      }
+      
+      // Send the chat with the final prompt and file names
+      if (finalPrompt) {
+        await sendChatMessage(finalPrompt, currentConvId, fileNamesForContext);
       }
     } catch (error) {
       console.error("Error:", error);
       setMessages((prev) => [
         ...prev,
-        {
-          role: "assistant",
-          content: `Xin lỗi, đã có lỗi xảy ra: ${
-            error.response?.data?.detail || error.message
-          }`,
-        },
+        { role: "assistant", content: `Error: ${error.message}` },
       ]);
     } finally {
       setIsLoading(false);
-      setThinkingSteps([]);  // Clear thinking steps
-      setActiveConversationId(null); // Clear active conversation when done thinking
-      onAgentThinkingChange?.(false); // Notify parent that agent is done thinking
-      // Only refresh sidebar on conversation creation or cleanup
-      // Don't refresh on every message to avoid excessive API calls
+      setThinkingSteps([]);
+      setActiveConversationId(null);
+      onAgentThinkingChange?.(false);
       try {
         const deletedCount = await conversationService.deleteEmptyConversations();
         if (deletedCount > 0) {

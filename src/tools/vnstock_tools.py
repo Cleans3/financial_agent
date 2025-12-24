@@ -595,7 +595,7 @@ def wrap_tool_result(
         Enhanced dict with {data, reasoning, summary, metrics}
     """
     try:
-        from ..utils.summarization import create_enhanced_tool_result
+        from ..core.summarization import create_enhanced_tool_result
         
         # Parse raw result
         result_dict = json.loads(raw_result) if isinstance(raw_result, str) else raw_result

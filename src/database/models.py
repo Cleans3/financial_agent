@@ -30,6 +30,7 @@ class ChatSession(Base):
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     title = Column(String, nullable=True)
     use_rag = Column(Boolean, default=True)
+    session_metadata = Column(JSON, nullable=True, default=dict)  # Store uploaded_files and other session data
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

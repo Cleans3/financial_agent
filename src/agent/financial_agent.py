@@ -4,6 +4,7 @@ Financial Agent - Agent chính sử dụng LangGraph và ReAct pattern
 
 import logging
 import os
+import asyncio
 from typing import Literal
 from pathlib import Path
 
@@ -16,7 +17,8 @@ import json
 from .state import AgentState
 from ..llm import LLMFactory
 from ..tools import get_all_tools
-from ..utils.summarization import summarize_tool_result
+from ..core.summarization import summarize_tool_result
+from ..core.tool_config import ToolsConfig, DEFAULT_TOOLS_CONFIG
 
 # Set up logging
 logging.basicConfig(
@@ -38,15 +40,24 @@ class FinancialAgent:
     5. End: Trả về câu trả lời cuối cùng
     """
     
-    def __init__(self):
-        """Initialize Financial Agent"""
+    def __init__(self, config: ToolsConfig = None):
+        """
+        Initialize Financial Agent.
+        
+        Args:
+            config: Optional ToolsConfig for tool and feature configuration
+        """
         logger.info("Initializing Financial Agent...")
+        
+        # Use provided config or default
+        self.config = config or DEFAULT_TOOLS_CONFIG
+        logger.info(f"Using config: tools={self.config.enabled_tools}, RAG={self.config.allow_rag}")
         
         # Get LLM from factory
         self.llm = LLMFactory.get_llm()
         
-        # Get all tools
-        self.tools = get_all_tools()
+        # Get all tools (config-filtered)
+        self.tools = get_all_tools(self.config)
         tool_names = []
         for t in self.tools:
             if hasattr(t, 'name'):
@@ -62,10 +73,16 @@ class FinancialAgent:
         with open(prompts_dir / "system_prompt.txt", "r", encoding="utf-8") as f:
             self.system_prompt = f.read().strip()
         
-        # Create workflow graph
+        # Create old-style LangGraph workflow (kept for backward compatibility)
         self.app = self._create_graph()
         
+        # Create new 10-node LangGraph workflow (main orchestrator)
+        from ..core.langgraph_workflow import get_langgraph_workflow
+        self.langgraph_workflow = get_langgraph_workflow(self)
+        
         logger.info("Financial Agent initialized successfully!")
+        logger.info("  - Old-style workflow: self.app (backward compatible)")
+        logger.info("  - New 10-node workflow: self.langgraph_workflow (main orchestrator)")
     
     def _get_tool_descriptions(self) -> str:
         """Get formatted tool descriptions for prompt"""
@@ -187,7 +204,7 @@ class FinancialAgent:
                                 # NOW summarize the merged answer if needed
                                 if state.get("summarize_results", True) and len(merged_answer) > 500:
                                     try:
-                                        from ..utils.summarization import summarize_tool_result
+                                        from ..core.summarization import summarize_tool_result
                                         summary = summarize_tool_result({"content": merged_answer}, self.llm)
                                         if summary:
                                             logger.info(f"📌 Merged answer summarized: {summary[:80]}...")
@@ -207,7 +224,7 @@ class FinancialAgent:
                 
                 if state.get("summarize_results", True) and len(tool_content) > 500:
                     try:
-                        from ..utils.summarization import summarize_tool_result
+                        from ..core.summarization import summarize_tool_result
                         summary = summarize_tool_result({"content": tool_content}, self.llm)
                         if summary:
                             logger.info(f"📌 Tool result summarized: {summary[:80]}...")
@@ -255,7 +272,7 @@ MỤC TIÊU DUY NHẤT: Hiển thị kết quả dữ liệu cho người dùng 
 
 Nhận xét: VIC hiện đang ở vùng quá mua (RSI > 70), có thể điều chỉnh trong ngắn hạn.
 
-❌ VÍ DỤ SAI (KHÔNG PHẢI TRẢ LỜI NHƯ DƯỚI ĐÂY):
+❌ VÍ DỤ SAI (KHÔNG PHẢI TRẢ LỜI NHƯ DƯƠI ĐÂY):
 "Kết quả là một object JSON chứa..."
 "Dữ liệu bao gồm các trường..."
 "Để giải quyết vấn đề này, bạn cần..."
@@ -357,9 +374,14 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             # Invoke LLM
             response = await chain.ainvoke({"messages": state["messages"]})
             
-            # Log tool calls if any
+            # ===== TOOL SELECTION REASONING LOG =====
+            logger.info("\n[SELECT] Tool selection reasoning:")
+            logger.info(f"  RAG results: {'YES' if has_rag_context else 'NO'}, score={rag_score:.2f if has_rag_context else 'N/A'} > threshold=0.50")
+            
             if hasattr(response, 'tool_calls') and response.tool_calls:
                 tool_names = [tc.get('name', 'unknown') for tc in response.tool_calls]
+                logger.info(f"  Decision: Using TOOLS (LLM requested execution)")
+                logger.info(f"  Tools: {', '.join(tool_names)}")
                 
                 # Check if we have RAG context - if yes, warn about unnecessary tool calls
                 if has_rag_context:
@@ -367,12 +389,17 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                     logger.warning(f"   Tools: {tool_names}")
                     logger.warning(f"   This might mean RAG context wasn't sufficient or system prompt wasn't followed")
                 
-                logger.info(f"✓ TOOL CALLS DETECTED: {tool_names}")
+                logger.info(f"\n✓ TOOL CALLS DETECTED: {tool_names}")
                 logger.info(f"   Tool count: {len(response.tool_calls)}")
                 for i, tc in enumerate(response.tool_calls, 1):
                     tool_name = tc.get('name', 'unknown')
                     logger.info(f"   [{i}] {tool_name}")
             else:
+                logger.info(f"  Decision: Using RAG or LLM-only")
+                if has_rag_context:
+                    logger.info(f"  Reason: RAG context sufficient (score={rag_score:.3f})")
+                else:
+                    logger.info(f"  Reason: General query, LLM-only response")
                 logger.info(f"\n✓ NO TOOL CALLS")
                 logger.info("   → LLM decided to answer directly")
             
@@ -521,9 +548,218 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         logger.info("LangGraph workflow created successfully!")
         return app
     
-    async def aquery(self, question: str, user_id: str = None, session_id: str = None, conversation_history: list = None, rag_documents: list = None, allow_tools: bool = True, use_rag: bool = True, summarize_results: bool = True) -> tuple:
+    async def aquery(self, question: str, user_id: str = None, session_id: str = None, conversation_history: list = None, uploaded_files: list = None, rag_documents: list = None, allow_tools: bool = True, use_rag: bool = True, summarize_results: bool = True) -> tuple:
         """
-        Async query - Xử lý câu hỏi của người dùng with Agentic RAG
+        Async query - Main entry point using simplified 2-node LangGraph workflow.
+        
+        ARCHITECTURE:
+        1. API Level (this method):
+           - File handling detection (new!)
+           - Query rewriting (disambiguation)
+           - RAG retrieval (dual search + filtering)
+           - Conversation context assembly
+        
+        2. Workflow Level (langgraph_workflow):
+           - Agent node: LLM decision (tool selection)
+           - Tools node: Execute selected tools
+           - Agent node: Final synthesis
+        
+        Args:
+            question: User's question (Vietnamese)
+            user_id: User ID for context
+            session_id: Session ID for context
+            conversation_history: Previous messages (list of dicts with 'role' and 'content')
+            uploaded_files: List of file metadata dicts (name, type, path, size, extension) for workflow
+            rag_documents: Pre-retrieved RAG documents (optional)
+            allow_tools: Whether tools can be called
+            use_rag: Whether RAG is enabled
+            summarize_results: Whether to summarize tool outputs
+            
+        Returns:
+            Tuple of (answer, thinking_steps) for display
+        """
+        try:
+            logger.info(f"\n{'='*80}")
+            logger.info(f"Processing question for user {user_id} in session {session_id}: {question}")
+            logger.info(f"{'='*80}\n")
+            
+            # ========== PHASE 1: QUERY REWRITING (API LEVEL) ==========
+            logger.info("="*60)
+            logger.info("🔄 QUERY REWRITING PHASE")
+            logger.info("="*60)
+            
+            rewritten_question = question
+            
+            # Check if query is clear and rewrite if needed
+            if hasattr(self, '_is_query_clear') and not self._is_query_clear(question):
+                try:
+                    rewritten_question, reason = await asyncio.to_thread(
+                        self.rewrite_query_with_context_sync,
+                        question,
+                        conversation_history or []
+                    )
+                    logger.info(f"Original query: {question}")
+                    logger.info(f"Rewritten query: {rewritten_question}")
+                except Exception as e:
+                    logger.warning(f"Rewrite failed: {e}, using original")
+                    rewritten_question = question
+            else:
+                logger.info(f"Original query: {question}")
+                logger.info("✓ Query is clear and specific - no rewriting needed")
+            
+            # ========== PHASE 2: RAG RETRIEVAL (API LEVEL) ==========
+            logger.info("\n📚 CONVERSATION CONTEXT")
+            
+            # Convert conversation_history from dict format to message objects
+            if not conversation_history:
+                conversation_history = []
+            
+            # Log conversation context
+            if conversation_history:
+                logger.info(f"   Added {len(conversation_history)} recent messages ({len(conversation_history)//2} exchanges)")
+            
+            # Retrieve RAG documents if enabled
+            rag_results = []
+            if use_rag:
+                logger.info("\n📖 RAG CONTEXT INTEGRATION")
+                
+                try:
+                    from ..services.multi_collection_rag_service import get_rag_service
+                    rag_service = get_rag_service()
+                    
+                    # Use pre-provided RAG documents or retrieve new ones
+                    if rag_documents:
+                        rag_results = rag_documents
+                        logger.info(f"   Using pre-provided {len(rag_documents)} document(s)")
+                    else:
+                        # Perform RAG search with the rewritten query
+                        rag_results = rag_service.search(
+                            query=rewritten_question,
+                            user_id=user_id or "default",
+                            session_id=session_id or "default"
+                        )
+                    
+                    # Filter by relevance threshold
+                    filtered_results = []
+                    for result in rag_results:
+                        similarity = result.get('score', result.get('similarity', 0))
+                        if similarity >= 0.30:  # Phase 2C fix: relevance threshold
+                            filtered_results.append(result)
+                    
+                    logger.info(f"   RAG document similarities: {[str(round(r.get('score', r.get('similarity', 0)), 2)) for r in rag_results]}")
+                    logger.info(f"   Filtered RAG results: {len(rag_results)} → {len(filtered_results)} relevant documents (threshold: 0.30)")
+                    
+                    # Log context preview
+                    if filtered_results:
+                        logger.info("   RAG section preview:")
+                        for doc in filtered_results[:3]:
+                            title = doc.get('title', 'Unknown')
+                            score = doc.get('score', doc.get('similarity', 0))
+                            logger.info(f"      • {title} (relevance: {score:.1%})")
+                    else:
+                        logger.info("\n⚠️  NO RAG DOCUMENTS")
+                        logger.info("   RAG was enabled but no documents matched relevance threshold")
+                    
+                    rag_results = filtered_results
+                    
+                except Exception as e:
+                    logger.warning(f"RAG retrieval failed: {e}")
+                    rag_results = []
+            
+            # ========== PHASE 3: BUILD MESSAGE HISTORY FOR WORKFLOW ==========
+            
+            # Convert conversation_history to LangChain message objects if needed
+            from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+            
+            # Build message history for the workflow
+            workflow_messages = []
+            
+            if conversation_history:
+                for msg in conversation_history:
+                    if isinstance(msg, BaseMessage):
+                        workflow_messages.append(msg)
+                    elif isinstance(msg, dict):
+                        role = msg.get('role', 'human')
+                        content = msg.get('content', '')
+                        if role == 'user' or role == 'human':
+                            workflow_messages.append(HumanMessage(content=content))
+                        elif role == 'assistant':
+                            workflow_messages.append(AIMessage(content=content))
+            
+            # Add current question as HumanMessage
+            workflow_messages.append(HumanMessage(content=question))
+            
+            # ========== PHASE 4: INVOKE SIMPLIFIED WORKFLOW ==========
+            logger.info("\n" + "="*60)
+            logger.info("🚀 INVOKING LANGGRAPH WORKFLOW")
+            logger.info("="*60 + "\n")
+            
+            # Invoke the simplified 2-node LangGraph workflow
+            # The workflow receives PREPROCESSED input:
+            # - Query already rewritten
+            # - RAG results already retrieved and filtered
+            # - Conversation history already assembled
+            # - Uploaded files for workflow processing
+            final_state = await self.langgraph_workflow.invoke(
+                user_prompt=question,
+                uploaded_files=uploaded_files or [],  # Pass file metadata to workflow
+                conversation_history=workflow_messages,
+                user_id=user_id or "default",
+                session_id=session_id or "default",
+                rag_results=rag_results,
+                tools_enabled=allow_tools
+            )
+            
+            # ========== PHASE 5: EXTRACT AND RETURN ANSWER ==========
+            logger.info("\n" + "="*60)
+            logger.info("📝 EXTRACTING FINAL ANSWER")
+            logger.info("="*60)
+            
+            answer = final_state.get("generated_answer", "")
+            metadata = final_state.get("metadata", {})
+            
+            logger.info(f"Final message type: AIMessage")
+            logger.info(f"Answer length: {len(answer)} chars")
+            logger.info(f"Answer preview: {answer[:100]}...")
+            logger.info(f"\n✅ ANSWER READY FOR USER {user_id}")
+            logger.info(f"   Final length: {len(answer)} chars\n")
+            
+            # Build thinking steps from workflow result
+            thinking_steps = [
+                {
+                    "step": 1,
+                    "title": "🔍 Query Analysis",
+                    "description": "Analyzed and rewritten query for clarity"
+                },
+                {
+                    "step": 2,
+                    "title": "📚 Document Retrieval",
+                    "description": f"Retrieved {len(rag_results)} relevant documents via RAG"
+                },
+                {
+                    "step": 3,
+                    "title": "🤖 Processing with Agent",
+                    "description": "Agent analyzed context and decided on tools"
+                },
+                {
+                    "step": 4,
+                    "title": "✅ Answer Ready",
+                    "description": f"Generated final answer using LLM + context"
+                }
+            ]
+            
+            return answer, thinking_steps
+            
+        except Exception as e:
+            logger.error(f"Error in aquery: {e}")
+            import traceback
+            traceback.print_exc()
+            return f"Error processing query: {str(e)}", []
+    
+    async def aquery_legacy(self, question: str, user_id: str = None, session_id: str = None, conversation_history: list = None, rag_documents: list = None, allow_tools: bool = True, use_rag: bool = True, summarize_results: bool = True) -> tuple:
+        """
+        Legacy async query method (kept for backward compatibility).
+        Uses the old-style self.app workflow.
         
         Args:
             question: Câu hỏi tiếng Việt
@@ -531,14 +767,12 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             session_id: Session ID (optional, for context)
             conversation_history: List of previous messages (optional)
             rag_documents: List of RAG document chunks to include in context (optional)
-            allow_tools: Whether to allow tool calls (default: True). Set False to disable tools
-            use_rag: Whether to use RAG documents (default: True). Set False to disable RAG
+            allow_tools: Whether to allow tool calls (default: True)
+            use_rag: Whether to use RAG documents (default: True)
             summarize_results: Whether to summarize tool results (default: True)
             
         Returns:
             Tuple of (answer, thinking_steps)
-            - answer: Câu trả lời từ agent
-            - thinking_steps: List of reasoning steps for visualization
         """
         try:
             logger.info(f"Processing question for user {user_id} in session {session_id}: {question}")
@@ -596,11 +830,11 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                 logger.info("RAG disabled by user preference")
                 rag_documents = None
             
-            # Step 3: Generate answer
+            # Step 3: Prepare for workflow invocation
             thinking_steps.append({
                 "step": 3,
-                "title": "💭 Generating Answer",
-                "description": "Calling LLM with optimized query..."
+                "title": "💭 Processing with Agent",
+                "description": "Invoking LangGraph workflow..."
             })
             
             # Build message list with conversation history
@@ -640,6 +874,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             
             has_rag = any("📚 Related Documents" in str(msg.content) for msg in messages if hasattr(msg, 'content'))
             
+            # Step 3: Prepare initial state
             initial_state = {
                 "messages": messages,
                 "allow_tools": allow_tools,
@@ -663,28 +898,21 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                         tool_name = tool_call.get('name', 'unknown') if isinstance(tool_call, dict) else getattr(tool_call, 'name', 'unknown')
                         tool_calls_made.append(tool_name)
             
-            # Add tool selection step if tools were called
+            # Update workflow step with results
             if tool_calls_made:
-                unique_tools = list(set(tool_calls_made))  # Remove duplicates
-                thinking_steps.insert(3, {  # Insert before "Generating Answer" step
-                    "step": 3,
-                    "title": "🔧 Selecting Tools",
-                    "description": f"Analyzing query to determine needed tools...",
-                    "result": f"Using {len(unique_tools)} tool(s): {', '.join(unique_tools)}"
-                })
-                # Adjust step numbers
-                for i in range(4, len(thinking_steps)):
-                    thinking_steps[i]["step"] = i + 1
+                unique_tools = list(set(tool_calls_made))
+                thinking_steps[-1]["result"] = f"Used {len(unique_tools)} tool(s): {', '.join(unique_tools)}"
+                thinking_steps[-1]["title"] = "⚙️  Agent Execution (with Tools)"
             else:
-                thinking_steps.insert(3, {  # Insert before "Generating Answer" step
-                    "step": 3,
-                    "title": "🔧 Tool Selection",
-                    "description": "Analyzing query to determine if tools are needed...",
-                    "result": "No tools needed - answering from knowledge base"
-                })
-                # Adjust step numbers
-                for i in range(4, len(thinking_steps)):
-                    thinking_steps[i]["step"] = i + 1
+                thinking_steps[-1]["result"] = "Answered from knowledge without tools"
+                thinking_steps[-1]["title"] = "⚙️  Agent Execution"
+            
+            # Add final answer generation step
+            thinking_steps.append({
+                "step": 4,
+                "title": "✅ Answer Ready",
+                "description": "Formatted and validated response..."
+            })
             
             # Get final answer
             logger.info("="*20)
@@ -1156,12 +1384,17 @@ Viết câu trả lời thực tế, không lặp lại "dữ liệu bao gồm..
     
     async def rewrite_query_with_context(self, question: str, conversation_history: list = None) -> tuple:
         """
-        Rewrite user query with context from conversation history
-        Only rewrites if query has ambiguous references that need clarification
+        Rewrite user query with context from conversation history.
+        
+        CRITICAL GUARDS:
+        1. Max 1 rewrite per query (tracked by rewrite_count in state)
+        2. Skip if filename found in query
+        3. Only rewrite if ambiguous AND conversation context available
+        4. Limit history to last 2 exchanges (4 messages) to prevent subject drift
         
         Args:
             question: Original user question
-            conversation_history: List of previous messages
+            conversation_history: List of previous messages (will limit to last 4)
             
         Returns:
             Tuple of (rewritten_query, reasoning)
@@ -1171,42 +1404,47 @@ Viết câu trả lời thực tế, không lặp lại "dữ liệu bao gồm..
         logger.info("="*20)
         logger.info(f"Original query: {question}")
         
+        # GUARD 1: No history available
         if not conversation_history or len(conversation_history) == 0:
             logger.info("⛔ No conversation history - using original query")
-            return question, "No conversation history - using original query"
+            return question, "No conversation history"
         
-        # Check if query needs context (contains ambiguous references)
-        ambiguous_words = ["it", "this", "that", "it's", "they", "them", "those", "these", "nó", "cái này", "cái kia", "nó là", "họ"]
-        has_ambiguous_ref = any(word.lower() in question.lower() for word in ambiguous_words)
-        
-        # If query is clear and specific, don't rewrite it
-        if not has_ambiguous_ref:
+        # GUARD 2: Check if query is clear and specific (no ambiguous pronouns)
+        is_clear = self._is_query_clear(question)
+        if is_clear:
             logger.info("✓ Query is clear and specific - no rewriting needed")
-            return question, "Query is clear and specific - no rewriting needed"
+            return question, "Query clear and specific"
         
-        logger.info("🤔 Ambiguous reference detected - attempting to clarify with context...")
+        # GUARD 3: Limit history to last 2 exchanges (4 messages) to prevent subject drift
+        recent_context = conversation_history[-4:] if conversation_history else []
         
-        # Get last turn for context (user + assistant)
-        recent_context = []
-        for msg in conversation_history[-2:]:  # Only last user-assistant pair
+        if not recent_context:
+            logger.info("⛔ Insufficient conversation history - using original query")
+            return question, "Insufficient history"
+        
+        logger.info(f"🤔 Ambiguous reference detected - attempting clarification...")
+        logger.info(f"Using last {len(recent_context)} messages from history")
+        
+        # Format context safely
+        context_str = ""
+        for msg in recent_context:
             role = "User" if msg.get("role") == "user" else "Assistant"
-            content = msg.get("content", "")[:100]  # Limit length
-            recent_context.append(f"{role}: {content}")
+            content = msg.get("content", "")[:100]
+            context_str += f"{role}: {content}\n"
         
-        context_str = "\n".join(recent_context)
-        logger.info(f"Context from history:\n{context_str}")
+        logger.info(f"History context:\n{context_str[:200]}...")
         
-        rewrite_prompt = f"""Based on the previous message, clarify what the ambiguous reference refers to.
+        rewrite_prompt = f"""Based on the recent conversation, clarify what the ambiguous reference refers to.
 
-Previous Context:
+Recent Conversation:
 {context_str}
 
-New Query: {question}
+User's New Query: {question}
 
 Rules:
-1. Only clarify ambiguous pronouns (it, this, that, etc.)
+1. Only clarify ambiguous pronouns (it, this, that, they, etc.)
 2. Keep the query as close to original as possible
-3. Just replace the ambiguous word with what it refers to
+3. Replace ambiguous words with what they refer to
 4. Respond ONLY with the clarified query (no explanation)
 
 Clarified Query:"""
@@ -1220,86 +1458,138 @@ Clarified Query:"""
             )
             rewritten = response.content if hasattr(response, 'content') else str(response)
             rewritten = rewritten.strip()
+            
             logger.info(f"✓ Query rewritten successfully:")
-            logger.info(f"  Before: {question}")
-            logger.info(f"  After:  {rewritten}")
+            logger.info(f"  Before: {question[:60]}...")
+            logger.info(f"  After:  {rewritten[:60]}...")
             return rewritten, "Query clarified with context"
         except Exception as e:
             logger.warning(f"❌ Query rewrite failed: {e}")
             logger.info("   → Proceeding with original query")
-            return question, f"Rewrite skipped due to error"
+            return question, f"Rewrite failed: {str(e)[:50]}"
     
-    def filter_rag_results(self, question: str, documents: list, min_relevance: float = 0.3) -> list:
+    async def _rewrite_query_if_needed(self, state: dict) -> dict:
         """
-        Filter RAG results based on relevance to the question
+        Rewrite query ONCE if ambiguous, with guards:
+        1. Skip if filename already present in query
+        2. Skip if rewrite_count >= 1 (max 1 rewrite per query)
+        3. Limit history to last 2 exchanges (4 messages)
+        """
+        user_prompt = state.get("user_prompt", "")
+        uploaded_files = state.get("uploaded_files", [])
+        conversation_history = state.get("conversation_history", [])
+        rewrite_count = state.get("rewrite_count", 0)
         
-        Args:
-            question: User question
-            documents: List of retrieved documents with similarity scores
-            min_relevance: Minimum relevance threshold (0-1). Default 0.3 (more lenient since Cosine is 0-1)
+        logger.info("====================")
+        logger.info("🔄 QUERY REWRITING PHASE")
+        logger.info("====================")
+        logger.info(f"Original query: {user_prompt[:80]}")
+        
+        # GUARD 1: Check if filename already in query
+        has_filename_in_query = False
+        if uploaded_files:
+            first_file = uploaded_files[0].get("filename", "")
+            if first_file and first_file in user_prompt:
+                has_filename_in_query = True
+                logger.info(f"✓ Filename found in query, skipping rewrite")
+        
+        # GUARD 2: Check rewrite count
+        if rewrite_count >= 1:
+            logger.info(f"⚠️  Rewrite limit reached ({rewrite_count}/1), skipping")
+            return state
+        
+        # GUARD 3: Check if query is clear/specific
+        is_clear = self._is_query_clear(user_prompt)
+        if is_clear and (has_filename_in_query or not uploaded_files):
+            logger.info("✓ Query is clear and specific - no rewriting needed")
+            state["rewritten_prompt"] = user_prompt
+            state["rewrite_count"] = 0
+            return state
+        
+        # GUARD 4: Only rewrite if ambiguous AND needs context
+        if not has_filename_in_query and uploaded_files:
+            # Limit history to last 2 exchanges (4 messages)
+            recent_history = conversation_history[-4:] if conversation_history else []
             
-        Returns:
-            Filtered documents, or all documents if any meet minimum threshold
-        """
-        if not documents:
-            return []
-        
-        # Log similarity scores for debugging
-        similarities = [doc.get('similarity', 0) for doc in documents]
-        logger.info(f"RAG document similarities: {[f'{s:.2f}' for s in similarities]}")
-        
-        # Filter by similarity threshold
-        filtered = [doc for doc in documents if doc.get('similarity', 0) >= min_relevance]
-        
-        # Additional check: if top result similarity is extremely low, exclude all
-        if documents and documents[0].get('similarity', 0) < 0.15:
-            logger.info(f"Top result similarity critically low ({documents[0].get('similarity', 0):.1%}), excluding all documents")
-            return []
-        
-        if filtered:  # If any documents meet the threshold, return them
-            logger.info(f"Filtered RAG results: {len(documents)} → {len(filtered)} relevant documents (threshold: {min_relevance:.2f})")
-            return filtered
+            logger.info(f"🤔 Ambiguous reference detected - attempting clarification...")
+            logger.info(f"Context from history: {len(recent_history)} recent messages")
+            
+            rewritten = await self._call_rewrite_agent(user_prompt, recent_history, uploaded_files)
+            state["rewritten_prompt"] = rewritten
+            state["rewrite_count"] = 1
+            
+            logger.info(f"✓ Query rewritten successfully:")
+            logger.info(f"  Before: {user_prompt[:60]}...")
+            logger.info(f"  After:  {rewritten[:60]}...")
         else:
-            # No documents meet threshold, but return top document anyway if it's reasonable
-            if documents[0].get('similarity', 0) >= 0.15:
-                logger.info(f"No documents above threshold ({min_relevance:.2f}), returning top document with similarity {documents[0].get('similarity', 0):.2f}")
-                return [documents[0]]
-            else:
-                logger.info(f"RAG results too low quality (top: {documents[0].get('similarity', 0):.2f}), skipping RAG")
-                return []
+            state["rewritten_prompt"] = user_prompt
+            state["rewrite_count"] = 0
+        
+        return state
     
-    def query(self, question: str, user_id: str = None, session_id: str = None, conversation_history: list = None, rag_documents: list = None) -> str:
+    def _is_query_clear(self, query: str) -> bool:
         """
-        Sync query - Wrapper for async query
+        Detect if query is clear/specific or ambiguous.
+        Clear: contains specific company/metric names or clear intent
+        Ambiguous: mostly pronouns/vague terms without specific subject
         
-        Args:
-            question: Câu hỏi tiếng Việt
-            user_id: User ID (optional, for context)
-            session_id: Session ID (optional, for context)
-            conversation_history: List of previous messages (optional)
-            rag_documents: List of RAG document chunks (optional)
-            
-        Returns:
-            Câu trả lời từ agent (only answer, not thinking steps)
+        Rules:
+        - If query contains ambiguous pronouns alone → AMBIGUOUS
+        - If > 30% ambiguous terms → AMBIGUOUS  
+        - Otherwise → CLEAR
         """
-        import asyncio
+        ambiguous_terms = ["this", "that", "it", "it's", "summarize", "analyze", "explain", 
+                          "what is it", "what about it", "tell me about it"]
         
-        try:
-            # Get or create event loop
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            # Run async query - aquery now returns (answer, thinking_steps)
-            answer, thinking_steps = loop.run_until_complete(
-                self.aquery(question, user_id=user_id, session_id=session_id, conversation_history=conversation_history, rag_documents=rag_documents)
-            )
-            
-            # Return only the answer for sync compatibility
-            return answer
-            
-        except Exception as e:
-            logger.error(f"Error in sync query: {e}")
-            return f"Xin lỗi, đã có lỗi xảy ra: {str(e)}"
+        lowercase = query.lower()
+        
+        # Direct matches for common ambiguous patterns
+        for term in ambiguous_terms:
+            if term in lowercase:
+                # Count total significant words
+                words = [w for w in lowercase.split() if len(w) > 2]  # Ignore short words
+                
+                # If query is mostly just ambiguous pattern
+                if len(words) <= 3 and (term in lowercase):
+                    return False  # Ambiguous: mostly pronouns
+        
+        # Check proportion of ambiguous terms (lower threshold)
+        ambiguous_count = sum(1 for term in ambiguous_terms if term in lowercase)
+        words = [w for w in lowercase.split() if len(w) > 2]
+        
+        if len(words) > 0 and (ambiguous_count / len(words)) > 0.30:
+            return False  # More than 30% ambiguous
+        
+        return True  # Clear and specific
+
+    async def _call_rewrite_agent(
+        self, 
+        query: str, 
+        history: List[dict], 
+        uploaded_files: List[dict]
+    ) -> str:
+        """Rewrite query using LLM with limited history context."""
+        first_file = uploaded_files[0].get("filename", "") if uploaded_files else ""
+        
+        history_text = ""
+        if history:
+            history_text = "\n".join([
+                f"User: {h.get('content', '')[:100]}" if h.get('role') == 'user' 
+                else f"Assistant: {h.get('content', '')[:100]}"
+                for h in history
+            ])
+        
+        prompt = f"""You are a query clarification agent. The user uploaded a file: {first_file}
+
+Recent conversation:
+{history_text or "(No recent conversation)"}
+
+User's current ambiguous query: {query}
+
+Your task: Clarify what the user is asking about regarding the uploaded file.
+Return ONLY the clarified query (1-2 sentences), nothing else.
+
+Clarified query:"""
+    
+        response = await self.llm.ainvoke(prompt)
+        return response.content if hasattr(response, 'content') else str(response)

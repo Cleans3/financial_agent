@@ -3,6 +3,9 @@ from sqlalchemy import desc
 from ..database.models import ChatSession, ChatMessage
 from typing import List, Optional
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SessionService:
     
@@ -33,15 +36,43 @@ class SessionService:
     
     @staticmethod
     def delete_session(db: Session, session_id: str, user_id: str) -> bool:
+        """Delete session and cascade delete from RAG points
+        
+        Steps:
+        1. Get session to extract session_id
+        2. Delete RAG points by chat_session_id
+        3. Delete messages from PostgreSQL
+        4. Delete session record
+        """
         session = db.query(ChatSession).filter(
             ChatSession.id == session_id,
             ChatSession.user_id == user_id
         ).first()
-        if session:
+        if not session:
+            return False
+        
+        try:
+            # Step 1: Delete from RAG (by chat_session_id)
+            from .multi_collection_rag_service import get_rag_service
+            rag_service = get_rag_service()
+            rag_service.delete_conversation_by_session_id(user_id, session_id)
+            logger.info(f"Deleted RAG points for session {session_id}")
+        except Exception as e:
+            logger.warning(f"Failed to delete RAG points for session {session_id}: {e}")
+        
+        try:
+            # Step 2: Delete messages
+            db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
+            
+            # Step 3: Delete session
             db.delete(session)
             db.commit()
+            logger.info(f"Deleted session {session_id} for user {user_id}")
             return True
-        return False
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to delete session from PostgreSQL: {e}")
+            return False
     
     @staticmethod
     def update_session_title(db: Session, session_id: str, user_id: str, title: str) -> Optional[ChatSession]:

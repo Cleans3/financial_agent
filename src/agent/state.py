@@ -2,7 +2,7 @@
 Agent State - Định nghĩa state cho LangGraph
 """
 
-from typing import TypedDict, Annotated, Sequence
+from typing import TypedDict, Annotated, Sequence, List, Dict, Any
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
@@ -17,9 +17,15 @@ class AgentState(TypedDict):
         has_rag_context: Whether RAG documents are attached
         summarize_results: User preference for tool result summarization (True/False/None=auto)
         _rag_documents: Raw RAG documents for merging with tool results
+        agent_steps: List of agent reasoning steps for streaming display
+        current_step: Current step number in workflow (for progress tracking)
+        step_callback: Optional callback for step emission (WebSocket streaming)
     """
     messages: Annotated[Sequence[BaseMessage], add_messages]
     allow_tools: bool = True
     has_rag_context: bool = False
     summarize_results: bool = True  # True=always summarize, False=never, True=default (auto >500 chars)
     _rag_documents: list = []
+    agent_steps: List[Dict[str, Any]] = []  # [{number, title, status, result, timestamp}]
+    current_step: int = 0  # 0=classify, 1=rewrite, 2=extract, etc.
+    step_callback: Any = None  # Optional async callback for step emission
