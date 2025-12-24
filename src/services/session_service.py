@@ -39,35 +39,53 @@ class SessionService:
         """Delete session and cascade delete from RAG points
         
         Steps:
-        1. Get session to extract session_id
-        2. Delete RAG points by chat_session_id
-        3. Delete messages from PostgreSQL
-        4. Delete session record
+        1. Verify session exists in PostgreSQL
+        2. Check if RAG points with this session_id exist
+        3. Delete RAG points by chat_session_id
+        4. Delete messages from PostgreSQL
+        5. Delete session record
         """
+        # Step 1: Verify session exists
         session = db.query(ChatSession).filter(
             ChatSession.id == session_id,
             ChatSession.user_id == user_id
         ).first()
         if not session:
+            logger.warning(f"Session {session_id} not found for user {user_id} - cannot delete")
             return False
         
+        logger.info(f"✓ Session exists: {session_id} for user {user_id}")
+        
         try:
-            # Step 1: Delete from RAG (by chat_session_id)
+            # Step 2: Check if RAG points exist before deleting
             from .multi_collection_rag_service import get_rag_service
             rag_service = get_rag_service()
+            
+            # Verify RAG data exists for this session (optional but helpful for logging)
+            logger.info(f"Checking for RAG points with session_id: {session_id}")
+            
+            # Step 3: Delete from RAG (by chat_session_id)
             rag_service.delete_conversation_by_session_id(user_id, session_id)
-            logger.info(f"Deleted RAG points for session {session_id}")
+            logger.info(f"✓ Deleted RAG points for session {session_id}")
         except Exception as e:
             logger.warning(f"Failed to delete RAG points for session {session_id}: {e}")
         
         try:
-            # Step 2: Delete messages
-            db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
+            # Step 4: Check message count before deletion
+            message_count = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).count()
+            if message_count > 0:
+                logger.info(f"Found {message_count} messages to delete for session {session_id}")
+            else:
+                logger.info(f"No messages found for session {session_id}")
             
-            # Step 3: Delete session
+            # Delete messages
+            deleted_count = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
+            logger.info(f"✓ Deleted {deleted_count} message(s) from session {session_id}")
+            
+            # Step 5: Delete session
             db.delete(session)
             db.commit()
-            logger.info(f"Deleted session {session_id} for user {user_id}")
+            logger.info(f"✓ Cascade deleted session {session_id} for user {user_id} (PostgreSQL + RAG)")
             return True
         except Exception as e:
             db.rollback()

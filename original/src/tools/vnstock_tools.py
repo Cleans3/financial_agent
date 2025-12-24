@@ -5,15 +5,12 @@ Sử dụng VnStock API (Free) để lấy dữ liệu
 
 import json
 import re
-import logging
 from typing import Optional
 from datetime import datetime, timedelta
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field, validator
 from vnstock import Vnstock
 import pandas as pd
-
-logger = logging.getLogger(__name__)
 
 
 # ============================================
@@ -93,44 +90,29 @@ class HistoricalDataInput(BaseModel):
 # Tool Implementations
 # ============================================
 
-@tool("get_company_info")
+@tool("get_company_info", args_schema=CompanyInfoInput)
 def get_company_info(ticker: str) -> str:
     """
     Lấy thông tin chi tiết về công ty theo mã chứng khoán.
     
+    Tool này trả về thông tin cơ bản về công ty như:
+    - Tên công ty
+    - Sàn giao dịch
+    - Ngành nghề
+    - Vốn hóa thị trường
+    - Website
+    
     Args:
-        ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG, FPT, VIC)
+        ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG)
         
     Returns:
         JSON string chứa thông tin công ty
+        
+    Example:
+        get_company_info(ticker="VNM")
     """
     try:
-        # Handle both direct string and wrapped dict arguments
-        if isinstance(ticker, dict):
-            if 'parameters' in ticker:
-                ticker = ticker['parameters'].get('ticker', '')
-            elif 'ticker' in ticker:
-                ticker = ticker['ticker']
-            else:
-                ticker = list(ticker.values())[0] if ticker else ''
-        
         # Validate and normalize ticker
-        ticker = str(ticker).upper().strip()
-        
-        logger.info("="*30)
-        logger.info(f"🔍 SEARCHING: get_company_info")
-        logger.info(f"   Ticker: {ticker}")
-        logger.info("="*30)
-        
-        # Validate ticker format
-        if not ticker or len(ticker) < 3:
-            error_msg = "Mã chứng khoán không hợp lệ. Vui lòng nhập mã 3-4 ký tự."
-            logger.warning(f"❌ Invalid ticker: {ticker}")
-            return json.dumps({
-                "success": False,
-                "message": error_msg
-            }, ensure_ascii=False)
-        
         ticker = ticker.upper().strip()
         
         # Initialize VnStock
@@ -140,11 +122,9 @@ def get_company_info(ticker: str) -> str:
         company_info = stock.company.overview()
         
         if company_info is None or (isinstance(company_info, pd.DataFrame) and company_info.empty):
-            error_msg = f"Không tìm thấy thông tin cho mã {ticker}. Vui lòng kiểm tra lại mã chứng khoán."
-            logger.warning(f"❌ Company not found: {ticker}")
             return json.dumps({
                 "success": False,
-                "message": error_msg,
+                "message": f"Không tìm thấy thông tin cho mã {ticker}. Vui lòng kiểm tra lại mã chứng khoán.",
                 "data": None
             }, ensure_ascii=False)
         
@@ -176,18 +156,9 @@ def get_company_info(ticker: str) -> str:
             "message": f"Đã tìm thấy thông tin công ty {ticker}"
         }
         
-        logger.info(f"✓ Search result:")
-        logger.info(f"  Company: {company_name}")
-        logger.info(f"  Industry: {result['data']['industry']}")
-        logger.info(f"  Profile: {result['data']['company_profile'][:100]}...")
-        logger.info(f"Full Result: {json.dumps(result, ensure_ascii=False, indent=2)}")
-        logger.info("="*30)
-        
         return json.dumps(result, ensure_ascii=False, indent=2)
         
     except Exception as e:
-        logger.error(f"❌ Error: {str(e)}")
-        logger.info("="*30)
         return json.dumps({
             "success": False,
             "message": f"Lỗi khi lấy thông tin công ty {ticker}: {str(e)}",
@@ -195,7 +166,7 @@ def get_company_info(ticker: str) -> str:
         }, ensure_ascii=False)
 
 
-@tool("get_historical_data")
+@tool("get_historical_data", args_schema=HistoricalDataInput)
 def get_historical_data(
     ticker: str,
     start_date: Optional[str] = None,
@@ -205,6 +176,13 @@ def get_historical_data(
     """
     Lấy dữ liệu giá lịch sử (OHLCV) của mã chứng khoán.
     
+    Tool này trả về dữ liệu:
+    - Open: Giá mở cửa
+    - High: Giá cao nhất
+    - Low: Giá thấp nhất
+    - Close: Giá đóng cửa
+    - Volume: Khối lượng giao dịch
+    
     Args:
         ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG)
         start_date: Ngày bắt đầu format YYYY-MM-DD (VD: "2023-01-01")
@@ -213,33 +191,13 @@ def get_historical_data(
         
     Returns:
         JSON string chứa dữ liệu giá lịch sử và thống kê
+        
+    Example:
+        get_historical_data(ticker="VNM", start_date="2023-01-01", end_date="2023-06-30")
+        get_historical_data(ticker="VCB", period="3M")
     """
     try:
-        # Handle both direct string and wrapped dict arguments
-        if isinstance(ticker, dict):
-            if 'parameters' in ticker:
-                params = ticker['parameters']
-                ticker = params.get('ticker', '')
-                start_date = params.get('start_date', start_date)
-                end_date = params.get('end_date', end_date)
-                period = params.get('period', period)
-            elif 'ticker' in ticker:
-                ticker = ticker['ticker']
-        
-        ticker = str(ticker).upper().strip()
-        
-        logger.info("="*30)
-        logger.info(f"🔍 SEARCHING: get_historical_data")
-        logger.info(f"   Ticker: {ticker}")
-        logger.info(f"   Start: {start_date}, End: {end_date}, Period: {period}")
-        logger.info("="*30)
-        
-        if not ticker or len(ticker) < 3:
-            logger.warning(f"❌ Invalid ticker: {ticker}")
-            return json.dumps({
-                "success": False,
-                "message": "Mã chứng khoán không hợp lệ."
-            }, ensure_ascii=False)
+        ticker = ticker.upper().strip()
         
         # Calculate dates based on period if provided
         if period and not start_date:
@@ -269,8 +227,6 @@ def get_historical_data(
         df = stock.quote.history(start=start_date, end=end_date)
         
         if df is None or df.empty:
-            logger.warning(f"❌ No data found for {ticker}")
-            logger.info("="*30)
             return json.dumps({
                 "success": False,
                 "message": f"Không có dữ liệu giá cho {ticker} từ {start_date} đến {end_date}",
@@ -314,19 +270,9 @@ def get_historical_data(
             "message": f"Đã lấy được {len(df)} bản ghi dữ liệu giá cho {ticker}. Hiển thị chi tiết trong bảng."
         }
         
-        logger.info(f"✓ Search result:")
-        logger.info(f"  Records: {len(df)}")
-        logger.info(f"  Period: {start_date} to {end_date}")
-        logger.info(f"  Statistics: High={stats['highest_price']}, Low={stats['lowest_price']}, Change={stats['price_change_percent']:.2f}%")
-        logger.info(f"  Data rows: {len(detailed_data)}")
-        logger.info(f"Full Result: {json.dumps(result, ensure_ascii=False, indent=2)}")
-        logger.info("="*30)
-        
         return json.dumps(result, ensure_ascii=False, indent=2)
         
     except Exception as e:
-        logger.error(f"❌ Error: {str(e)}")
-        logger.info("="*30)
         return json.dumps({
             "success": False,
             "message": f"Lỗi khi lấy dữ liệu giá {ticker}: {str(e)}",
@@ -334,33 +280,28 @@ def get_historical_data(
         }, ensure_ascii=False)
 
 
-@tool("get_shareholders")
+@tool("get_shareholders", args_schema=CompanyInfoInput)
 def get_shareholders(ticker: str) -> str:
     """
     Lấy danh sách cổ đông lớn của công ty.
+    
+    Tool này trả về thông tin về:
+    - Tên cổ đông
+    - Số lượng cổ phiếu nắm giữ
+    - Tỷ lệ sở hữu (%)
+    - Ngày cập nhật
     
     Args:
         ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG)
         
     Returns:
         JSON string chứa danh sách cổ đông
+        
+    Example:
+        get_shareholders(ticker="VNM")
     """
     try:
-        # Handle both direct string and wrapped dict arguments
-        if isinstance(ticker, dict):
-            if 'parameters' in ticker:
-                ticker = ticker['parameters'].get('ticker', '')
-            elif 'ticker' in ticker:
-                ticker = ticker['ticker']
-        
-        ticker = str(ticker).upper().strip()
-        
-        if not ticker or len(ticker) < 3:
-            return json.dumps({
-                "success": False,
-                "message": "Mã chứng khoán không hợp lệ."
-            }, ensure_ascii=False)
-        
+        ticker = ticker.upper().strip()
         stock = Vnstock().stock(symbol=ticker, source='VCI')
         shareholders = stock.company.shareholders()
         
@@ -402,45 +343,29 @@ def get_shareholders(ticker: str) -> str:
         }, ensure_ascii=False)
 
 
-@tool("get_officers")
+@tool("get_officers", args_schema=CompanyInfoInput)
 def get_officers(ticker: str) -> str:
     """
     Lấy danh sách ban lãnh đạo của công ty.
+    
+    Tool này trả về thông tin về:
+    - Tên thành viên
+    - Chức vụ
+    - Tỷ lệ sở hữu cổ phiếu (%)
+    - Số lượng cổ phiếu nắm giữ
     
     Args:
         ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG)
         
     Returns:
         JSON string chứa danh sách ban lãnh đạo
+        
+    Example:
+        get_officers(ticker="VNM")
     """
     try:
-        # Handle both direct string and wrapped dict arguments
-        if isinstance(ticker, dict):
-            if 'parameters' in ticker:
-                ticker = ticker['parameters'].get('ticker', '')
-            elif 'ticker' in ticker:
-                ticker = ticker['ticker']
-        
-        # Validate ticker input
-        if not ticker or not isinstance(ticker, str):
-            raise ValueError(f"Ticker phải là chuỗi không rỗng, nhận được: {type(ticker)} = {ticker}")
-        
-        ticker = str(ticker).upper().strip()
-        
-        if not ticker or len(ticker) < 3:
-            raise ValueError(f"Ticker phải có ít nhất 3 ký tự, nhận được: '{ticker}'")
-        
-        # Initialize VnStock
-        try:
-            stock = Vnstock().stock(symbol=ticker, source='VCI')
-        except Exception as e:
-            return json.dumps({
-                "success": False,
-                "message": f"Lỗi kết nối VnStock cho mã {ticker}: {str(e)}",
-                "data": None
-            }, ensure_ascii=False)
-        
-        # Get officers data
+        ticker = ticker.upper().strip()
+        stock = Vnstock().stock(symbol=ticker, source='VCI')
         officers = stock.company.officers()
         
         if officers is None or (isinstance(officers, pd.DataFrame) and officers.empty):
@@ -479,33 +404,27 @@ def get_officers(ticker: str) -> str:
         }, ensure_ascii=False)
 
 
-@tool("get_subsidiaries")
+@tool("get_subsidiaries", args_schema=CompanyInfoInput)
 def get_subsidiaries(ticker: str) -> str:
     """
     Lấy danh sách công ty con và công ty liên kết.
+    
+    Tool này trả về thông tin về:
+    - Tên công ty con/liên kết
+    - Tỷ lệ sở hữu (%)
+    - Loại hình (công ty con, công ty liên kết)
     
     Args:
         ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG)
         
     Returns:
-        JSON string chứa danh sách công ty con/liên kết
+        JSON string chứa danh sách công ty con
+        
+    Example:
+        get_subsidiaries(ticker="VNM")
     """
     try:
-        # Handle both direct string and wrapped dict arguments
-        if isinstance(ticker, dict):
-            if 'parameters' in ticker:
-                ticker = ticker['parameters'].get('ticker', '')
-            elif 'ticker' in ticker:
-                ticker = ticker['ticker']
-        
-        ticker = str(ticker).upper().strip()
-        
-        if not ticker or len(ticker) < 3:
-            return json.dumps({
-                "success": False,
-                "message": "Mã chứng khoán không hợp lệ."
-            }, ensure_ascii=False)
-        
+        ticker = ticker.upper().strip()
         stock = Vnstock().stock(symbol=ticker, source='VCI')
         subsidiaries = stock.company.subsidiaries()
         
@@ -544,33 +463,29 @@ def get_subsidiaries(ticker: str) -> str:
         }, ensure_ascii=False)
 
 
-@tool("get_company_events")
+@tool("get_company_events", args_schema=CompanyInfoInput)
 def get_company_events(ticker: str) -> str:
     """
     Lấy danh sách sự kiện của công ty (chia cổ tức, họp đại hội cổ đông, v.v.).
+    
+    Tool này trả về thông tin về:
+    - Tên sự kiện
+    - Ngày công bố
+    - Ngày thực hiện
+    - Tỷ lệ (nếu có)
+    - Giá trị (nếu có)
     
     Args:
         ticker: Mã chứng khoán viết HOA (VD: VNM, VCB, HPG)
         
     Returns:
         JSON string chứa danh sách sự kiện
+        
+    Example:
+        get_company_events(ticker="VNM")
     """
     try:
-        # Handle both direct string and wrapped dict arguments
-        if isinstance(ticker, dict):
-            if 'parameters' in ticker:
-                ticker = ticker['parameters'].get('ticker', '')
-            elif 'ticker' in ticker:
-                ticker = ticker['ticker']
-        
-        ticker = str(ticker).upper().strip()
-        
-        if not ticker or len(ticker) < 3:
-            return json.dumps({
-                "success": False,
-                "message": "Mã chứng khoán không hợp lệ."
-            }, ensure_ascii=False)
-        
+        ticker = ticker.upper().strip()
         stock = Vnstock().stock(symbol=ticker, source='VCI')
         events = stock.company.events()
         
@@ -613,61 +528,6 @@ def get_company_events(ticker: str) -> str:
             "message": f"Lỗi khi lấy sự kiện {ticker}: {str(e)}",
             "data": None
         }, ensure_ascii=False)
-
-
-def wrap_tool_result(
-    raw_result: str,
-    tool_name: str,
-    ticker: str,
-    llm = None,
-    reasoning: str = "Financial data retrieval"
-) -> dict:
-    """Wrap tool result with enhanced context: data, reasoning, summary.
-    
-    Args:
-        raw_result: Original JSON string result from tool
-        tool_name: Name of the tool called
-        ticker: Stock ticker
-        llm: Language model for summarization (optional)
-        reasoning: Why this tool was called
-        
-    Returns:
-        Enhanced dict with {data, reasoning, summary, metrics}
-    """
-    try:
-        from ..core.summarization import create_enhanced_tool_result
-        
-        # Parse raw result
-        result_dict = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
-        
-        # Create enhanced result (skip summary if no LLM provided)
-        if llm:
-            enhanced = create_enhanced_tool_result(
-                data=result_dict,
-                tool_name=tool_name,
-                llm=llm,
-                reasoning=reasoning,
-                raw_result=result_dict
-            )
-        else:
-            # Fallback without summarization
-            enhanced = {
-                "data": result_dict,
-                "tool": tool_name,
-                "reasoning": reasoning,
-                "summary": None,
-                "metrics": {}
-            }
-        return enhanced
-    except Exception as e:
-        # Fallback: return raw result on error
-        return {
-            "data": json.loads(raw_result) if isinstance(raw_result, str) else raw_result,
-            "tool": tool_name,
-            "reasoning": reasoning,
-            "summary": None,
-            "metrics": {}
-        }
 
 
 def get_vnstock_tools():

@@ -102,19 +102,19 @@ class LangGraphWorkflow:
         
         Returns extracted data and updates workflow state.
         """
-        logger.info("\n" + "="*60)
+        logger.info("="*30)
         logger.info(">>> EXTRACT_DATA NODE")
-        logger.info("="*60)
+        logger.info("="*30)
         
         uploaded_files = state.get("uploaded_files", [])
         
         if not uploaded_files:
             logger.info("✓ No files to extract")
-            logger.info("\n📋 EXTRACT_DATA NODE SUMMARY")
-            logger.info("="*60)
+            logger.info("📋 EXTRACT_DATA NODE SUMMARY")
+            logger.info("="*30)
             logger.info("Files to process: 0")
             logger.info("Status: SKIPPED (no files)")
-            logger.info("="*60 + "\n")
+            logger.info("="*30)
             return {
                 "extracted_file_data": None,
                 "needs_file_processing": False,
@@ -165,15 +165,19 @@ class LangGraphWorkflow:
             
             logger.info(f"✓ File extraction complete: {len(extracted_data)} file(s) processed")
             
-            # Add node summary
-            logger.info("\n📋 EXTRACT_DATA NODE SUMMARY")
-            logger.info("="*60)
+            # Add node summary with full file info
+            logger.info("📋 EXTRACT_DATA NODE SUMMARY")
+            logger.info("="*30)
             logger.info(f"Files to process: {len(uploaded_files)}")
             successful_files = sum(1 for f in extracted_data.values() if f.get("success"))
             logger.info(f"Successfully extracted: {successful_files}")
             total_chunks = sum(len(f.get("chunks", [])) for f in extracted_data.values() if f.get("success"))
             logger.info(f"Total chunks created: {total_chunks}")
-            logger.info("="*60 + "\n")
+            for file_name, file_data in extracted_data.items():
+                if file_data.get("success"):
+                    logger.info(f"File: {file_name} | Type: {file_data.get('metadata', {}).get('file_type')} | Chunks: {len(file_data.get('chunks', []))}")
+                    logger.info(f"  Content preview: {file_data.get('content', '')[:200]}...")
+            logger.info("="*30)
             
             return {
                 "extracted_file_data": extracted_data if extracted_data else None,
@@ -200,9 +204,9 @@ class LangGraphWorkflow:
         
         Returns list of ingested file IDs.
         """
-        logger.info("\n" + "="*60)
+        logger.info("="*30)
         logger.info(">>> INGEST_FILE NODE")
-        logger.info("="*60)
+        logger.info("="*30)
         
         extracted_data = state.get("extracted_file_data")
         user_id = state.get("user_id", "default")
@@ -210,11 +214,11 @@ class LangGraphWorkflow:
         
         if not extracted_data:
             logger.info("✓ No extracted data to ingest")
-            logger.info("\n📋 INGEST_FILE NODE SUMMARY")
-            logger.info("="*60)
+            logger.info("📋 INGEST_FILE NODE SUMMARY")
+            logger.info("="*30)
             logger.info("Files to ingest: 0")
             logger.info("Status: SKIPPED (no files)")
-            logger.info("="*60 + "\n")
+            logger.info("="*30)
             return {
                 "ingested_file_ids": [],
                 "metadata": {
@@ -274,15 +278,17 @@ class LangGraphWorkflow:
             
             logger.info(f"✓ Ingestion complete: {len(ingested_file_ids)} file(s), {total_chunks_added} chunks total")
             
-            # Add node summary
-            logger.info("\n📋 INGEST_FILE NODE SUMMARY")
-            logger.info("="*60)
+            # Add node summary with full ingestion details
+            logger.info("📋 INGEST_FILE NODE SUMMARY")
+            logger.info("="*30)
             logger.info(f"Files to ingest: {len(extracted_data)}")
             logger.info(f"Successfully ingested: {len(ingested_file_ids)}")
             logger.info(f"Total chunks ingested: {total_chunks_added}")
             logger.info(f"User: {user_id}")
             logger.info(f"Session: {session_id}")
-            logger.info("="*60 + "\n")
+            for file_id in ingested_file_ids:
+                logger.info(f"Ingested file: {file_id}")
+            logger.info("="*30)
             
             return {
                 "ingested_file_ids": ingested_file_ids,
@@ -339,9 +345,9 @@ class LangGraphWorkflow:
         - On second pass (after tools), synthesizes final answer
         - Updates conversation_history with messages
         """
-        logger.info("\n" + "="*60)
+        logger.info("="*30)
         logger.info(">>> AGENT NODE INVOKED")
-        logger.info("="*60)
+        logger.info("="*30)
         
         # Get current state
         messages = state.get("conversation_history", [])
@@ -456,17 +462,19 @@ Hướng dẫn:
                 logger.info("    → LLM decided to answer directly")
                 logger.info("✅ ROUTING DECISION: No tool calls → END")
             
-            # Add node summary
-            answer_preview = (response.content[:80] + "...") if hasattr(response, 'content') else str(response)[:80]
-            logger.info("\n" + "="*60)
+            # Add node summary with full answer
+            full_answer = response.content if hasattr(response, 'content') else str(response)
             logger.info("📋 AGENT NODE SUMMARY")
-            logger.info("="*60)
+            logger.info("="*30)
             logger.info(f"Input: {len(messages)} messages")
             logger.info(f"LLM Decision: {'Call tools' if tool_calls else 'Answer directly'}")
             logger.info(f"Tool Calls: {len(tool_calls)} tools")
-            logger.info(f"Output Preview: {answer_preview}")
+            for i, tc in enumerate(tool_calls, 1):
+                logger.info(f"  [{i}] {tc.get('name', 'unknown')} - Args: {tc.get('args', {})}")
+            logger.info(f"Full Answer:")
+            logger.info(f"{full_answer}")
             logger.info(f"RAG Used: {'Yes' if rag_context else 'No'}")
-            logger.info("="*60 + "\n")
+            logger.info("="*30)
             
             return {
                 "conversation_history": updated_messages,
@@ -568,9 +576,9 @@ Guidelines:
         - Returns tool results as ToolMessage
         - Routes back to AGENT for final synthesis
         """
-        logger.info("\n" + "="*60)
+        logger.info("="*30)
         logger.info(">>> TOOLS NODE INVOKED")
-        logger.info("="*60)
+        logger.info("="*30)
         
         messages = state.get("conversation_history", [])
         
@@ -620,17 +628,21 @@ Guidelines:
             logger.info(f"✓ Tools executed successfully")
             logger.info(f"✓ {messages_added} result message(s) added to context (total: {len(updated_messages)} messages)")
             
-            # Add node summary
-            logger.info("\n" + "="*60)
+            # Add node summary with full tool results
             logger.info("📋 TOOLS NODE SUMMARY")
-            logger.info("="*60)
+            logger.info("="*30)
             logger.info(f"Input: {len(messages)} messages")
             logger.info(f"Tool Calls Executed: {len(last_ai_message.tool_calls)}")
             for i, tc in enumerate(last_ai_message.tool_calls, 1):
-                logger.info(f"  [{i}] {tc.get('name', 'unknown')}")
+                logger.info(f"  [{i}] {tc.get('name', 'unknown')} - Args: {tc.get('args', {})}")
             logger.info(f"Tool Results: {messages_added} message(s) added")
             logger.info(f"Output: {len(updated_messages)} total messages")
-            logger.info("="*60 + "\n")
+            # Log full tool results
+            for msg in updated_messages[-messages_added:]:
+                if hasattr(msg, 'content'):
+                    logger.info(f"Tool Result:")
+                    logger.info(f"{msg.content}")
+            logger.info("="*30)
             
             return {"conversation_history": updated_messages}
             
@@ -680,9 +692,13 @@ Guidelines:
         Returns:
             Final WorkflowState with generated_answer populated
         """
-        logger.info("\n" + "="*60)
+        logger.info("="*30)
         logger.info("🚀 LANGGRAPH WORKFLOW INVOKED")
-        logger.info("="*60)
+        logger.info("="*30)
+        logger.info(f"User Prompt: {user_prompt}")
+        logger.info(f"Files: {len(uploaded_files) if uploaded_files else 0}")
+        logger.info(f"History messages: {len(conversation_history) if conversation_history else 0}")
+        logger.info(f"RAG results: {len(rag_results) if rag_results else 0}")
         
         # Create initial state
         initial_state = create_initial_state(
@@ -700,9 +716,11 @@ Guidelines:
         # Run workflow
         final_state = await self.graph.ainvoke(initial_state)
         
-        logger.info("="*60)
+        logger.info("="*30)
         logger.info("✅ LANGGRAPH WORKFLOW COMPLETED")
-        logger.info("="*60 + "\n")
+        logger.info(f"Final Answer:")
+        logger.info(f"{final_state.get('generated_answer', 'No answer generated')}")
+        logger.info("="*30)
         
         return final_state
 

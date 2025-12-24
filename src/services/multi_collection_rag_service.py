@@ -372,9 +372,15 @@ class MultiCollectionRAGService:
             List of search results with scores and metadata
         """
         try:
+            # Generate query embedding from text
+            from src.core.embeddings import EmbeddingModel
+            embedding_model = EmbeddingModel()
+            query_embedding = embedding_model.embed_query(query)
+            
             # Use Qdrant manager's search method
             results = self.qd_manager.search(
                 user_id=user_id,
+                query_embedding=query_embedding,
                 query_text=query,
                 chat_session_id=session_id,
                 limit=10,
@@ -620,11 +626,62 @@ class MultiCollectionRAGService:
         
         This removes all points in user's collection that have the matching chat_session_id
         in their metadata. Used during conversation deletion to clean up RAG points.
+        
+        Validation Steps:
+        1. Verify collection exists
+        2. SEARCH for points with matching chat_session_id to verify they exist
+        3. If points found: Delete them
+        4. If no points found: Log and return gracefully (no error)
+        5. Log detailed results
         """
         try:
             collection_name = self.qd_manager._get_user_collection_name(user_id)
+            logger.info(f"Checking for RAG points with session_id={chat_session_id} in collection {collection_name}")
             
-            # Delete all points with matching chat_session_id
+            # Step 1: Verify collection exists
+            try:
+                collection_info = self.qd_manager.client.get_collection(collection_name)
+                logger.info(f"✓ Collection exists: {collection_name} (total_points: {collection_info.points_count})")
+            except Exception as e:
+                logger.warning(f"Collection {collection_name} not found: {e}")
+                logger.info(f"No RAG points to delete (collection doesn't exist)")
+                return
+            
+            # Step 2: SEARCH for points with matching chat_session_id BEFORE deletion
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            try:
+                # Use scroll to find all points with matching session_id
+                points_result, _ = self.qd_manager.client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="chat_session_id",
+                                match=MatchValue(value=chat_session_id)
+                            )
+                        ]
+                    ),
+                    limit=10000  # Get all matching points
+                )
+                
+                point_count = len(points_result)
+                
+                if point_count == 0:
+                    logger.info(f"✓ No RAG points found with chat_session_id={chat_session_id} (nothing to delete)")
+                    return
+                
+                logger.info(f"✓ Found {point_count} RAG point(s) with chat_session_id={chat_session_id}")
+                
+            except Exception as e:
+                logger.warning(f"Could not search for points before deletion: {e}")
+                # Continue with deletion anyway (may be network issue)
+                point_count = -1  # Unknown
+            
+            # Step 3: Delete all points with matching chat_session_id (only if we found points)
+            if point_count == 0:
+                logger.info(f"Skipping deletion (no points found)")
+                return
+            
             self.qd_manager.client.delete(
                 collection_name=collection_name,
                 points_selector=Filter(
@@ -637,9 +694,13 @@ class MultiCollectionRAGService:
                 )
             )
             
-            logger.info(f"Deleted all points with chat_session_id={chat_session_id} from user {user_id}")
+            if point_count > 0:
+                logger.info(f"✓ Deleted {point_count} RAG point(s) with chat_session_id={chat_session_id} from user {user_id}")
+            else:
+                logger.info(f"Deletion completed (attempted to delete points with chat_session_id={chat_session_id})")
+                
         except Exception as e:
-            logger.error(f"Failed to delete points by chat_session_id: {e}")
+            logger.error(f"Failed to delete RAG points for session {chat_session_id}: {e}")
     
     def delete_file_data(self, user_id: str, file_id: str):
         """Delete all vectors associated with a file"""

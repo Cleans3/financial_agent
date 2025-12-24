@@ -76,13 +76,48 @@ class FinancialAgent:
         # Create old-style LangGraph workflow (kept for backward compatibility)
         self.app = self._create_graph()
         
-        # Create new 10-node LangGraph workflow (main orchestrator)
+        # Import configuration for workflow version selection
+        from ..core.config import settings
+        
+        # Load all available workflows
+        # Create legacy 10-node LangGraph workflow (fallback)
         from ..core.langgraph_workflow import get_langgraph_workflow
         self.langgraph_workflow = get_langgraph_workflow(self)
         
-        logger.info("Financial Agent initialized successfully!")
-        logger.info("  - Old-style workflow: self.app (backward compatible)")
-        logger.info("  - New 10-node workflow: self.langgraph_workflow (main orchestrator)")
+        # Create V3 workflow (8-node)
+        try:
+            from ..core.langgraph_workflow_v3 import LangGraphWorkflowV3
+            self.langgraph_workflow_v3 = LangGraphWorkflowV3(self)
+            logger.info("✅ V3 workflow loaded (8-node enhanced architecture)")
+        except Exception as e:
+            logger.warning(f"❌ V3 workflow not available: {e}")
+            self.langgraph_workflow_v3 = None
+        
+        # Create V4 workflow (13-node - latest)
+        try:
+            from ..core.langgraph_workflow_v4 import LangGraphWorkflowV4
+            self.langgraph_workflow_v4 = LangGraphWorkflowV4(self, enable_observer=settings.WORKFLOW_OBSERVER_ENABLED)
+            logger.info("✅ V4 workflow loaded (13-node complete architecture)")
+        except Exception as e:
+            logger.warning(f"❌ V4 workflow not available: {e}")
+            self.langgraph_workflow_v4 = None
+        
+        # Determine default workflow version based on configuration
+        self.workflow_version = settings.WORKFLOW_VERSION
+        self.canary_rollout_percentage = settings.CANARY_ROLLOUT_PERCENTAGE
+        
+        logger.info(f"📊 Workflow Configuration:")
+        logger.info(f"   Default version: {self.workflow_version}")
+        logger.info(f"   Canary rollout: {self.canary_rollout_percentage}%")
+        logger.info(f"   Observer enabled: {settings.WORKFLOW_OBSERVER_ENABLED}")
+        
+        logger.info("✅ Financial Agent initialized successfully!")
+        logger.info("   - Old-style workflow: self.app (backward compatible)")
+        logger.info("   - Legacy 10-node: self.langgraph_workflow (fallback)")
+        if self.langgraph_workflow_v3:
+            logger.info("   - V3 (8-node): self.langgraph_workflow_v3")
+        if self.langgraph_workflow_v4:
+            logger.info("   - V4 (13-node): self.langgraph_workflow_v4 ⭐")
     
     def _get_tool_descriptions(self) -> str:
         """Get formatted tool descriptions for prompt"""
@@ -119,9 +154,9 @@ class FinancialAgent:
         Returns:
             Updated state with LLM response
         """
-        logger.info("="*20)
+        logger.info("="*30)
         logger.info(">>> AGENT NODE INVOKED")
-        logger.info("="*20)
+        logger.info("="*30)
         
         # Log the incoming message state for debugging
         message_count = len(state["messages"])
@@ -387,7 +422,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             response = await chain.ainvoke({"messages": state["messages"]})
             
             # ===== TOOL SELECTION REASONING LOG =====
-            logger.info("\n[SELECT] Tool selection reasoning:")
+            logger.info("[SELECT] Tool selection reasoning:")
             logger.info(f"  RAG results: {'YES' if has_rag_context else 'NO'}, score={rag_score:.2f if has_rag_context else 'N/A'} > threshold=0.50")
             
             if hasattr(response, 'tool_calls') and response.tool_calls:
@@ -437,7 +472,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         last_message = state["messages"][-1] if state["messages"] else None
         
         if not last_message:
-            logger.info("\n⛔ ROUTING DECISION: No messages → END")
+            logger.info("⛔ ROUTING DECISION: No messages → END")
             return "end"
         
         # Check if last message has tool calls
@@ -591,19 +626,30 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             Tuple of (answer, thinking_steps) for display
         """
         try:
-            logger.info(f"\n{'='*80}")
+            logger.info(f"{'='*30}")
             logger.info(f"Processing question for user {user_id} in session {session_id}: {question}")
-            logger.info(f"{'='*80}\n")
+            logger.info(f"{'='*30}")
             
             # ========== PHASE 1: QUERY REWRITING (API LEVEL) ==========
-            logger.info("="*60)
+            logger.info("="*30)
             logger.info("🔄 QUERY REWRITING PHASE")
-            logger.info("="*60)
+            logger.info("="*30)
             
             rewritten_question = question
             
+            # Skip rewriting for greetings and simple queries
+            import re
+            greeting_patterns = [
+                r"^\s*(hello|hi|xin chào|chào|how are you|thanks|thank you|cảm ơn|goodbye|bye|tạm biệt|what'?s?\s+up|who are you|bạn là ai)\s*[\.\?\!]*\s*$",
+                r"^(sao thế)\s*[\.\?\!]*\s*$"
+            ]
+            is_greeting = any(re.match(p, question.lower().strip(), re.IGNORECASE) for p in greeting_patterns)
+            
+            if is_greeting:
+                logger.info(f"Original query: {question}")
+                logger.info("✓ Query is a greeting - skipping rewriting")
             # Check if query is clear and rewrite if needed
-            if hasattr(self, '_is_query_clear') and not self._is_query_clear(question):
+            elif hasattr(self, '_is_query_clear') and not self._is_query_clear(question):
                 try:
                     rewritten_question, reason = await asyncio.to_thread(
                         self.rewrite_query_with_context_sync,
@@ -612,6 +658,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                     )
                     logger.info(f"Original query: {question}")
                     logger.info(f"Rewritten query: {rewritten_question}")
+                    logger.info(f"Reason: {reason}")
                 except Exception as e:
                     logger.warning(f"Rewrite failed: {e}, using original")
                     rewritten_question = question
@@ -620,7 +667,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                 logger.info("✓ Query is clear and specific - no rewriting needed")
             
             # ========== PHASE 2: RAG RETRIEVAL (API LEVEL) ==========
-            logger.info("\n📚 CONVERSATION CONTEXT")
+            logger.info("📚 CONVERSATION CONTEXT")
             
             # Convert conversation_history from dict format to message objects
             if not conversation_history:
@@ -633,7 +680,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             # Retrieve RAG documents if enabled
             rag_results = []
             if use_rag:
-                logger.info("\n📖 RAG CONTEXT INTEGRATION")
+                logger.info("📖 RAG CONTEXT INTEGRATION")
                 
                 try:
                     from ..services.multi_collection_rag_service import get_rag_service
@@ -661,15 +708,17 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                     logger.info(f"   RAG document similarities: {[str(round(r.get('score', r.get('similarity', 0)), 2)) for r in rag_results]}")
                     logger.info(f"   Filtered RAG results: {len(rag_results)} → {len(filtered_results)} relevant documents (threshold: 0.30)")
                     
-                    # Log context preview
+                    # Log full retrieved documents
                     if filtered_results:
-                        logger.info("   RAG section preview:")
-                        for doc in filtered_results[:3]:
+                        logger.info("   Retrieved Documents:")
+                        for i, doc in enumerate(filtered_results, 1):
                             title = doc.get('title', 'Unknown')
                             score = doc.get('score', doc.get('similarity', 0))
-                            logger.info(f"      • {title} (relevance: {score:.1%})")
+                            content = doc.get('content', doc.get('text', ''))[:500]
+                            logger.info(f"   [{i}] {title} (relevance: {score:.1%})")
+                            logger.info(f"       Content: {content}...")
                     else:
-                        logger.info("\n⚠️  NO RAG DOCUMENTS")
+                        logger.info("⚠️  NO RAG DOCUMENTS")
                         logger.info("   RAG was enabled but no documents matched relevance threshold")
                     
                     rag_results = filtered_results
@@ -701,40 +750,74 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             # Add current question as HumanMessage
             workflow_messages.append(HumanMessage(content=question))
             
-            # ========== PHASE 4: INVOKE SIMPLIFIED WORKFLOW ==========
-            logger.info("\n" + "="*60)
-            logger.info("🚀 INVOKING LANGGRAPH WORKFLOW")
-            logger.info("="*60 + "\n")
+            # ========== PHASE 4: SELECT AND INVOKE WORKFLOW ==========
+            logger.info("="*50)
+            logger.info("🚀 WORKFLOW SELECTION & INVOCATION")
+            logger.info("="*50)
+            logger.info(f"User prompt: {question}")
+            logger.info(f"Rewritten: {rewritten_question}")
+            logger.info(f"Files: {len(uploaded_files) if uploaded_files else 0}")
+            logger.info(f"History messages: {len(workflow_messages)}")
+            logger.info(f"RAG results: {len(rag_results)}")
             
-            # Invoke the simplified 2-node LangGraph workflow
-            # The workflow receives PREPROCESSED input:
-            # - Query already rewritten
-            # - RAG results already retrieved and filtered
-            # - Conversation history already assembled
-            # - Uploaded files for workflow processing
-            final_state = await self.langgraph_workflow.invoke(
-                user_prompt=question,
-                uploaded_files=uploaded_files or [],  # Pass file metadata to workflow
-                conversation_history=workflow_messages,
-                user_id=user_id or "default",
-                session_id=session_id or "default",
-                rag_results=rag_results,
-                tools_enabled=allow_tools
-            )
+            # Determine which workflow version to use for this user
+            from ..core.config import settings
+            selected_version = settings.should_use_workflow_version(user_id)
+            logger.info(f"📌 Workflow Selection:")
+            logger.info(f"   User: {user_id}")
+            logger.info(f"   Default: {self.workflow_version}")
+            logger.info(f"   Canary %: {self.canary_rollout_percentage}%")
+            logger.info(f"   Selected: {selected_version} ⭐")
+            
+            # Invoke the selected workflow
+            if selected_version == "v4" and self.langgraph_workflow_v4:
+                logger.info(f"\n➡️  Using V4 (13-node complete architecture)")
+                final_state = await self.langgraph_workflow_v4.invoke(
+                    user_prompt=question,
+                    uploaded_files=uploaded_files or [],
+                    conversation_history=workflow_messages,
+                    user_id=user_id or "default",
+                    session_id=session_id or "default",
+                    rag_results=rag_results,
+                    tools_enabled=allow_tools
+                )
+            elif selected_version == "v3" and self.langgraph_workflow_v3:
+                logger.info(f"\n➡️  Using V3 (8-node enhanced architecture)")
+                final_state = await self.langgraph_workflow_v3.invoke(
+                    user_prompt=question,
+                    uploaded_files=uploaded_files or [],
+                    conversation_history=workflow_messages,
+                    user_id=user_id or "default",
+                    session_id=session_id or "default",
+                    rag_results=rag_results,
+                    tools_enabled=allow_tools
+                )
+            else:
+                logger.info(f"\n➡️  Fallback to legacy 10-node (simplified)")
+                final_state = await self.langgraph_workflow.invoke(
+                    user_prompt=question,
+                    uploaded_files=uploaded_files or [],
+                    conversation_history=workflow_messages,
+                    user_id=user_id or "default",
+                    session_id=session_id or "default",
+                    rag_results=rag_results,
+                    tools_enabled=allow_tools
+                )
             
             # ========== PHASE 5: EXTRACT AND RETURN ANSWER ==========
-            logger.info("\n" + "="*60)
+            logger.info("="*30)
             logger.info("📝 EXTRACTING FINAL ANSWER")
-            logger.info("="*60)
+            logger.info("="*30)
             
             answer = final_state.get("generated_answer", "")
             metadata = final_state.get("metadata", {})
             
             logger.info(f"Final message type: AIMessage")
             logger.info(f"Answer length: {len(answer)} chars")
-            logger.info(f"Answer preview: {answer[:100]}...")
+            logger.info(f"Full Answer:")
+            logger.info(f"{answer}")
             logger.info(f"\n✅ ANSWER READY FOR USER {user_id}")
-            logger.info(f"   Final length: {len(answer)} chars\n")
+            logger.info(f"   Final length: {len(answer)} chars")
             
             # Build thinking steps from workflow result
             thinking_steps = [
@@ -895,13 +978,13 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                 "_rag_documents": rag_documents if rag_documents else []
             }
             
-            logger.info("="*20)
+            logger.info("="*30)
             logger.info("🚀 INVOKING LANGGRAPH WORKFLOW")
-            logger.info("="*20)
+            logger.info("="*30)
             result = await self.app.ainvoke(initial_state)
-            logger.info("="*20)
+            logger.info("="*30)
             logger.info("✅ LANGGRAPH WORKFLOW COMPLETED")
-            logger.info("="*20)
+            logger.info("="*30)
             
             tool_calls_made = []
             for msg in result.get("messages", []):
@@ -927,9 +1010,9 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             })
             
             # Get final answer
-            logger.info("="*20)
+            logger.info("="*30)
             logger.info("📝 EXTRACTING FINAL ANSWER")
-            logger.info("="*20)
+            logger.info("="*30)
             final_message = result["messages"][-1]
             final_msg_type = type(final_message).__name__
             logger.info(f"Final message type: {final_msg_type}")
@@ -1411,9 +1494,9 @@ Viết câu trả lời thực tế, không lặp lại "dữ liệu bao gồm..
         Returns:
             Tuple of (rewritten_query, reasoning)
         """
-        logger.info("="*20)
+        logger.info("="*30)
         logger.info("🔄 QUERY REWRITING PHASE")
-        logger.info("="*20)
+        logger.info("="*30)
         logger.info(f"Original query: {question}")
         
         # GUARD 1: No history available

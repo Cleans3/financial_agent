@@ -6,16 +6,8 @@ They are handled by FileProcessingPipeline for document ingestion.
 """
 
 from typing import Optional
-from .vnstock_tools import (
-    get_vnstock_tools,
-    get_company_info,
-    get_historical_data,
-    get_shareholders,
-    get_officers,
-    get_subsidiaries,
-    get_company_events
-)
-from .technical_tools import get_technical_tools, calculate_sma, calculate_rsi
+from .vnstock_tools import get_vnstock_tools
+from .technical_tools import get_technical_tools
 
 
 def get_all_tools(config=None):
@@ -29,20 +21,29 @@ def get_all_tools(config=None):
         config: Optional ToolsConfig for filtering enabled tools
         
     Returns:
-        List of available tools
+        List of available tools (deduplicated by tool name)
     """
     if config is None:
         from src.core.tool_config import DEFAULT_TOOLS_CONFIG
         config = DEFAULT_TOOLS_CONFIG
     
     tools = []
+    seen_tool_names = set()  # Track registered tool names to prevent duplicates
     
     # Only include configured tools
     for tool_category in config.enabled_tools:
+        tools_to_add = []
         if tool_category == "vnstock_tools":
-            tools.extend(get_vnstock_tools())
+            tools_to_add = get_vnstock_tools()
         elif tool_category == "technical_tools":
-            tools.extend(get_technical_tools())
+            tools_to_add = get_technical_tools()
+        
+        # Add tools, skipping duplicates by name
+        for tool in tools_to_add:
+            tool_name = getattr(tool, 'name', str(tool))
+            if tool_name not in seen_tool_names:
+                tools.append(tool)
+                seen_tool_names.add(tool_name)
     
     # NOTE: File processing tools NOT included
     # - get_financial_report_tools() → handled by FileProcessingPipeline
@@ -55,12 +56,4 @@ __all__ = [
     "get_all_tools",
     "get_vnstock_tools",
     "get_technical_tools",
-    "get_company_info",
-    "get_historical_data",
-    "get_shareholders",
-    "get_officers",
-    "get_subsidiaries",
-    "get_company_events",
-    "calculate_sma",
-    "calculate_rsi",
 ]

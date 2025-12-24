@@ -50,9 +50,14 @@ const Sidebar = ({ isOpen, onClose, user, onNewChat, onSelectConversation, onCon
         }
       }
       
-      await conversationService.deleteConversation(id);
-      await loadConversations();
+      // Remove from UI immediately (optimistic update)
+      const updatedConversations = conversations.filter(c => c.id !== id);
+      setConversations(updatedConversations);
       
+      // Delete from server
+      await conversationService.deleteConversation(id);
+      
+      // If we're in the deleted conversation, switch to another
       if (currentConversationId === id) {
         if (nearestId) {
           onSelectConversation?.(nearestId);
@@ -62,6 +67,8 @@ const Sidebar = ({ isOpen, onClose, user, onNewChat, onSelectConversation, onCon
       }
     } catch (error) {
       console.error('Error deleting conversation:', error);
+      // Reload conversations on error to restore UI state
+      await loadConversations();
     }
   };
 

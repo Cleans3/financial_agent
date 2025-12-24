@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     ENABLE_SUMMARIZATION: bool = os.getenv("ENABLE_SUMMARIZATION", "True").lower() == "true"
     ENABLE_QUERY_REWRITING: bool = os.getenv("ENABLE_QUERY_REWRITING", "True").lower() == "true"
     
+    # Workflow Version Configuration (Phase 4)
+    WORKFLOW_VERSION: str = os.getenv("WORKFLOW_VERSION", "v4")  # v2, v3, or v4
+    CANARY_ROLLOUT_PERCENTAGE: int = int(os.getenv("CANARY_ROLLOUT_PERCENTAGE", "100"))  # 0-100
+    WORKFLOW_OBSERVER_ENABLED: bool = os.getenv("WORKFLOW_OBSERVER_ENABLED", "True").lower() == "true"
+    
     RAG_MIN_RELEVANCE: float = float(os.getenv("RAG_MIN_RELEVANCE", "0.3"))
     RAG_MAX_DOCUMENTS: int = int(os.getenv("RAG_MAX_DOCUMENTS", "5"))
     SUMMARIZATION_THRESHOLD: int = int(os.getenv("SUMMARIZATION_THRESHOLD", "500"))
@@ -77,5 +82,30 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list:
         return [origin.strip() for origin in self.CORS_ORIGINS_STR.split(",")]
+    
+    def should_use_workflow_version(self, user_id: str = None) -> str:
+        """Determine which workflow version to use based on canary rollout.
+        
+        Args:
+            user_id: Optional user ID for consistent canary assignment
+            
+        Returns:
+            Workflow version string: 'v2', 'v3', or 'v4'
+        """
+        if self.CANARY_ROLLOUT_PERCENTAGE >= 100:
+            return self.WORKFLOW_VERSION
+        if self.CANARY_ROLLOUT_PERCENTAGE <= 0:
+            return "v3"  # Fallback to v3
+        
+        # Use hash of user_id for consistent assignment
+        if user_id:
+            hash_val = hash(user_id) % 100
+            if hash_val < self.CANARY_ROLLOUT_PERCENTAGE:
+                return self.WORKFLOW_VERSION
+            return "v3"
+        
+        # Random assignment if no user_id
+        import random
+        return self.WORKFLOW_VERSION if random.random() * 100 < self.CANARY_ROLLOUT_PERCENTAGE else "v3"
 
 settings = Settings()

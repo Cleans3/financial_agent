@@ -1456,7 +1456,7 @@ async def upload_file(
         file_type_map = {'pdf': 'pdf', 'excel': 'excel', 'image': 'image'}
         file_type = 'pdf' if is_pdf else ('excel' if is_excel else 'image')
         
-        logger.info(f"\n====================\nUPLOAD: {file_name} ({file_type})\n====================")
+        logger.info(f"\n============================================================\nUPLOAD: {file_name} ({file_type})\n============================================================")
         logger.info(f"User: {user_id}")
         
         with tempfile.NamedTemporaryFile(
