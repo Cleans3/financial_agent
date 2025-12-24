@@ -255,8 +255,11 @@ class MultiCollectionRAGService:
         self,
         query: str,
         user_id: str,
-        session_id: str,
+        session_id: Optional[str] = None,
+        chat_session_id: Optional[str] = None,
         uploaded_filenames: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        include_global: bool = False,
     ) -> List[dict]:
         """
         Search with 3-phase approach with detailed logging:
@@ -265,10 +268,22 @@ class MultiCollectionRAGService:
         3. RRF ranking and deduplication
         
         CRITICAL: For uploaded files, use threshold 0.50 (not 0.30)
+        
+        Args:
+            query: Search query
+            user_id: User ID for collection isolation
+            session_id: Chat session ID (alternative parameter name for chat_session_id)
+            chat_session_id: Chat session ID (primary parameter name)
+            uploaded_filenames: List of uploaded filenames to boost
+            limit: Max results to return (ignored - uses internal ranking)
+            include_global: Whether to include global collection results
         """
+        # Normalize session_id parameter (accept both names for compatibility)
+        actual_session_id = chat_session_id or session_id or None
+        
         logger.info(f"[RETRIEVE] Search strategy initiated:")
         logger.info(f"  Query: '{query[:60]}...'")
-        logger.info(f"  Session: {session_id}")
+        logger.info(f"  Session: {actual_session_id}")
         logger.info(f"  Files: {uploaded_filenames if uploaded_filenames else 'None'}")
         
         # Phase 1: Filename extraction and boost setup
@@ -285,7 +300,7 @@ class MultiCollectionRAGService:
         
         # Phase 2: Semantic search with filename priority
         semantic_results = self._semantic_search_with_filename_boost(
-            query, user_id, session_id, filename_boost
+            query, user_id, actual_session_id, filename_boost
         )
         logger.info(f"[RETRIEVE] Phase 1 - Semantic Search: {len(semantic_results)} results")
         for i, r in enumerate(semantic_results[:5]):
@@ -294,7 +309,7 @@ class MultiCollectionRAGService:
             logger.info(f"    [{i+1}] {fname}: score={score:.3f}")
         
         # Phase 3: Keyword search
-        keyword_results = self._keyword_search(query, user_id, session_id)
+        keyword_results = self._keyword_search(query, user_id, actual_session_id)
         logger.info(f"[RETRIEVE] Phase 2 - Keyword Search: {len(keyword_results)} results")
         for i, r in enumerate(keyword_results[:3]):
             logger.info(f"    [{i+1}] {r.get('source', 'unknown')}")
@@ -338,6 +353,92 @@ class MultiCollectionRAGService:
         
         # Re-sort by boosted scores
         return sorted(base_results, key=lambda x: x.get("score", 0), reverse=True)
+    
+    def _semantic_search(
+        self,
+        query: str,
+        user_id: str,
+        session_id: Optional[str] = None
+    ) -> List[dict]:
+        """
+        Perform semantic search using embeddings.
+        
+        Args:
+            query: Search query
+            user_id: User ID for collection isolation
+            session_id: Optional session ID for conversation isolation
+            
+        Returns:
+            List of search results with scores and metadata
+        """
+        try:
+            # Use Qdrant manager's search method
+            results = self.qd_manager.search(
+                user_id=user_id,
+                query_text=query,
+                chat_session_id=session_id,
+                limit=10,
+                include_global=False
+            )
+            
+            # Convert Qdrant results to our format
+            formatted_results = []
+            for result in results:
+                formatted_results.append({
+                    "score": result.get("similarity", 0),
+                    "text": result.get("text", ""),
+                    "metadata": result.get("metadata", {}),
+                    "doc": result
+                })
+            
+            return formatted_results
+        except Exception as e:
+            logger.error(f"Semantic search failed: {e}")
+            return []
+    
+    def _keyword_search(
+        self,
+        query: str,
+        user_id: str,
+        session_id: Optional[str] = None
+    ) -> List[dict]:
+        """
+        Perform keyword search using text matching.
+        Serves as secondary search for hybrid results.
+        
+        Args:
+            query: Search query
+            user_id: User ID for collection isolation
+            session_id: Optional session ID for conversation isolation
+            
+        Returns:
+            List of search results matching keywords
+        """
+        try:
+            # Use Qdrant manager's keyword search
+            results = self.qd_manager.search_by_keyword(
+                query=query,
+                user_id=user_id,
+                chat_session_id=session_id,
+                limit=10
+            )
+            
+            # Convert to our format
+            formatted_results = []
+            for result in results:
+                formatted_results.append({
+                    "score": result.get("similarity", 0),
+                    "text": result.get("text", ""),
+                    "metadata": result.get("metadata", {}),
+                    "source": result.get("source", ""),
+                    "doc": result
+                })
+            
+            return formatted_results
+        except Exception as e:
+            logger.debug(f"Keyword search failed (non-critical): {e}")
+            return []
+    
 
     def _apply_rrf_ranking_with_threshold(
         self, 

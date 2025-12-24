@@ -123,7 +123,7 @@ class LangGraphWorkflow:
         logger.info(f"📄 Processing {len(uploaded_files)} file(s)")
         
         try:
-            from ..core.file_processing_pipeline import FileProcessingPipeline
+            from ..services.file_processing_pipeline import FileProcessingPipeline
             
             pipeline = FileProcessingPipeline()
             extracted_data = {}

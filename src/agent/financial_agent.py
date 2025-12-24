@@ -139,6 +139,42 @@ class FinancialAgent:
         except Exception as e:
             logger.debug(f"Token estimation skipped: {e}")
         
+        # CHECK FOR GREETING FIRST - before processing any messages
+        # List of simple greetings and non-financial queries that shouldn't trigger tool calls
+        greetings = [
+            "hello", "hi", "hey", "xin chào", "chào", "chào bạn",
+            "how are you", "bạn khỏe không", "như thế nào",
+            "thanks", "cảm ơn", "thank you", "thank",
+            "help me", "giúp tôi", "hỗ trợ",
+            "ok", "okay", "được", "tốt"
+        ]
+        
+        # Check if the last message is a human greeting (not a tool result)
+        if state["messages"]:
+            last_msg = state["messages"][-1]
+            if isinstance(last_msg, HumanMessage):
+                query_text = str(last_msg.content).lower().strip()
+                
+                # Check if query is EXACTLY a greeting or is a greeting with only punctuation
+                # e.g., "hello" or "hello?" or "hello!" should match, but "hello world" should not
+                query_clean = query_text.rstrip('?!.,;:')  # Remove trailing punctuation
+                
+                is_greeting = any(
+                    query_clean == g or  # Exact match after removing punctuation
+                    (query_text == g) or  # Exact match as-is
+                    (query_clean.startswith(g + ' ') and len(query_clean.split()) == 2 and 
+                     query_clean.split()[1] in ['?', '!', '.', ',', ';', ':'])  # Greeting + punctuation
+                    for g in greetings
+                )
+                
+                if is_greeting:
+                    logger.info(f"✓ DETECTED GREETING QUERY: '{query_text}'")
+                    logger.info(f"--- Responding conversationally without tools ---")
+                    conversational_response = AIMessage(
+                        content="Tôi là trợ lý tư vấn tài chính. Bạn có câu hỏi gì về chứng khoán Việt Nam không? Tôi có thể giúp bạn với: thông tin công ty, dữ liệu giá cổ phiếu, phân tích kỹ thuật (SMA, RSI), thông tin cổ đông, ban lãnh đạo, v.v."
+                    )
+                    return {"messages": state["messages"] + [conversational_response]}
+        
         if state["messages"]:
             last_msg = state["messages"][-1]
             msg_type = type(last_msg).__name__
@@ -310,30 +346,6 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                 # Create AIMessage with the processed result
                 final_response = AIMessage(content=content)
                 return {"messages": state["messages"] + [final_response]}
-        
-        # Check if the last message is a simple greeting/non-financial query
-        last_message = state["messages"][-1] if state["messages"] else None
-        if last_message and hasattr(last_message, 'content'):
-            query_text = str(last_message.content).lower().strip()
-            
-            # List of simple greetings and non-financial queries that shouldn't trigger tool calls
-            greetings = [
-                "hello", "hi", "hey", "xin chào", "chào", "chào bạn",
-                "how are you", "bạn khỏe không", "như thế nào",
-                "thanks", "cảm ơn", "thank you", "thank",
-                "help me", "giúp tôi", "hỗ trợ",
-                "ok", "okay", "được", "tốt"
-            ]
-            
-            # Check if query is just a greeting
-            is_greeting = any(query_text.startswith(g) or query_text == g for g in greetings)
-            
-            if is_greeting:
-                logger.info(f"--- AGENT: Detected greeting query, responding conversationally without tools ---")
-                conversational_response = AIMessage(
-                    content="Tôi là trợ lý tư vấn tài chính. Bạn có câu hỏi gì về chứng khoán Việt Nam không? Tôi có thể giúp bạn với: thông tin công ty, dữ liệu giá cổ phiếu, phân tích kỹ thuật (SMA, RSI), thông tin cổ đông, ban lãnh đạo, v.v."
-                )
-                return {"messages": state["messages"] + [conversational_response]}
         
         # Prepare prompt with tool descriptions
         tool_descriptions = self._get_tool_descriptions()
