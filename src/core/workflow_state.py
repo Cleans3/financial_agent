@@ -69,10 +69,13 @@ class WorkflowState(TypedDict):
     
     # ===== FILE EXTRACTION PHASE (EXTRACT_DATA node) =====
     extracted_file_data: Optional[Dict]     # Structured data from files
+    file_metadata: List[Dict]               # File metadata from extraction (path, name, type, size)
     
     # ===== FILE INGESTION PHASE (INGEST_FILE node) =====
     embedding_method: Optional[EmbeddingMethod]  # Selected embedding method
     ingested_file_ids: List[str]                 # IDs of ingested files
+    files_ingested: bool                    # Whether files were successfully ingested
+    ingested_chunks: int                    # Number of chunks ingested
     
     # ===== RETRIEVAL PHASE (RETRIEVE_PERSONAL & RETRIEVE_GLOBAL nodes) =====
     personal_semantic_results: List[Dict]   # Semantic search results from personal vectordb
@@ -150,10 +153,13 @@ def create_initial_state(
         
         # File Extraction
         extracted_file_data=None,
+        file_metadata=[],
         
         # File Ingestion
         embedding_method=None,
         ingested_file_ids=[],
+        files_ingested=False,
+        ingested_chunks=0,
         
         # Retrieval
         personal_semantic_results=[],

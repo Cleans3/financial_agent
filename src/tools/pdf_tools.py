@@ -284,7 +284,9 @@ def analyze_pdf(
         PDFAnalysisResult chứa text, tables, analysis, và processing method
     """
     try:
-        logger.info(f"====================\nPDF ANALYSIS INITIATED\n====================")
+        logger.info(f"====================")
+        logger.info(f"Starting PDF analysis")
+        logger.info(f"====================")
         logger.info(f"PDF File: {pdf_path}")
         logger.info(f"Question: {question if question else '(none)'}")
         

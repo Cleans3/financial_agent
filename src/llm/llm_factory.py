@@ -29,6 +29,7 @@ class LLMFactory:
     
     _instance = None
     _initialized = False
+    _first_use = True  # Track first actual use
     
     @staticmethod
     def get_llm() -> BaseChatModel:
@@ -77,7 +78,7 @@ class LLMFactory:
             num_predict=LLMConfig.MAX_TOKENS,
         )
         
-        logger.info("Ollama LLM created successfully")
+        logger.info("Ollama LLM created successfully (LOCAL method)")
         return llm
     
     @staticmethod
@@ -108,12 +109,31 @@ class LLMFactory:
             max_tokens=LLMConfig.MAX_TOKENS,
         )
         
-        logger.info("Gemini LLM created successfully")
+        logger.info("Gemini LLM created successfully (CLOUD method)")
         return llm
+    
+    @staticmethod
+    def mark_first_use():
+        """Mark that LLM has been used for first time with actual prompt"""
+        if LLMFactory._first_use:
+            LLMFactory._first_use = False
+            separator = "x" * 50
+            logger.info(separator)
+            logger.info("LLM MODEL ACTIVATION - FIRST PROMPT")
+            provider = LLMConfig.PROVIDER.lower()
+            method = "CLOUD" if provider == "gemini" else "LOCAL"
+            logger.info(f"Provider: {provider.upper()}, Method: {method}")
+            if provider == "ollama":
+                logger.info(f"Model: {LLMConfig.OLLAMA_MODEL}")
+                logger.info(f"Base URL: {LLMConfig.OLLAMA_BASE_URL}")
+            elif provider == "gemini":
+                logger.info(f"Model: {LLMConfig.GEMINI_MODEL}")
+            logger.info(separator)
     
     @staticmethod
     def reset():
         """Reset singleton instance (for testing only)"""
         LLMFactory._instance = None
         LLMFactory._initialized = False
+        LLMFactory._first_use = True
         logger.info("LLM Factory reset")

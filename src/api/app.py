@@ -357,17 +357,17 @@ async def health_check(db: Session = Depends(get_db)):
         logger.error(f"Database health check failed: {e}")
         health_status["database"] = "unhealthy"
     
-    # Check RAG service
-    try:
-        from ..services.multi_collection_rag_service import get_rag_service
-        rag_service = get_rag_service()
-        if rag_service and hasattr(rag_service, 'index'):
-            health_status["rag_service"] = "healthy"
-        else:
-            health_status["rag_service"] = "unavailable"
-    except Exception as e:
-        logger.warning(f"RAG service health check failed: {e}")
-        health_status["rag_service"] = "unavailable"
+    # RAG service check disabled - RAG now orchestrated by workflow only
+    # try:
+    #     from ..services.multi_collection_rag_service import get_rag_service
+    #     rag_service = get_rag_service()
+    #     if rag_service and hasattr(rag_service, 'index'):
+    #         health_status["rag_service"] = "healthy"
+    #     else:
+    #         health_status["rag_service"] = "unavailable"
+    # except Exception as e:
+    #     logger.warning(f"RAG service health check failed: {e}")
+    #     health_status["rag_service"] = "unavailable"
     
     # Check LLM service
     try:
@@ -618,85 +618,70 @@ async def chat(
             summarize_results = True
             logger.info("User enabled result summarization")
         
-        # Detect if user explicitly requests RAG (e.g., "what is 1+1, use RAG")
-        force_rag = False
-        rag_keywords = ["use rag", "con rag", "sử dụng rag", "với rag", "kèm rag", "dùng rag"]
-        if any(keyword.lower() in request.question.lower() for keyword in rag_keywords):
-            force_rag = True
-            logger.info(f"User explicitly requested RAG: {request.question[:50]}")
+        # Detect if user explicitly requests NO RAG (opt-out)
+        force_no_rag = False
+        no_rag_keywords = ["no rag", "không rag", "không dùng rag", "tắt rag", "disable rag"]
+        if any(keyword.lower() in request.question.lower() for keyword in no_rag_keywords):
+            force_no_rag = True
+            logger.info(f"User explicitly disabled RAG: {request.question[:50]}")
         
-        # Use RAG router to decide if documents are needed (agentic routing)
-        should_use_rag = request.use_rag  # Default to user preference
-        routing_decision = None
+        # NOTE: RAG search now happens INSIDE the workflow (in RETRIEVE node)
+        # This allows file ingestion to happen BEFORE RAG search
+        # The workflow will handle RAG routing and search
+        # RAG is ENABLED by default, only disable if user explicitly requests it
+        use_rag = (request.use_rag and not force_no_rag) or (request.use_rag is True)
+        logger.info(f"RAG will be handled by workflow: use_rag={use_rag}")
         
-        if request.use_rag and not force_rag:
-            try:
-                from ..services.rag_router import get_rag_router
-                router = get_rag_router()  # Router gets LLM from factory, not agent
-                should_use_rag, routing_decision = await router.should_use_rag(
-                    request.question,
-                    conversation_history
-                )
-                logger.info(f"RAG router decision: use_rag={should_use_rag}, type={routing_decision.get('query_type')}, confidence={routing_decision.get('confidence')}")
-            except Exception as router_error:
-                logger.warning(f"RAG router error (defaulting to enabled): {router_error}")
-                should_use_rag = True
-        elif force_rag:
-            should_use_rag = True
-            routing_decision = {
-                "use_rag": True,
-                "query_type": "explicit_rag_request",
-                "confidence": 1.0,
-                "reasoning": "User explicitly requested RAG"
-            }
-            logger.info("User forced RAG - bypassing router decision")
+        # Get full file metadata from session (has path, type, size, etc.)
+        # IMPORTANT: Only use files if they're explicitly passed in THIS request!
+        # Check if user actually uploaded files in this prompt (request.uploaded_files field)
+        uploaded_files_info = []
+        logger.info(f"[CHAT] Checking if files were uploaded in THIS request...")
+        logger.info(f"[CHAT] request.uploaded_files: {request.uploaded_files}")
         
-        # Handle RAG document retrieval if router decision is YES
-        rag_documents = None
-        if should_use_rag:
-            try:
-                from src.services.multi_collection_rag_service import get_rag_service
-                rag_service = get_rag_service()
-                rag_documents = rag_service.search(
-                    query=request.question,
-                    user_id=user_id,
-                    chat_session_id=session_id,
-                    limit=3,
-                    include_global=True
-                )
-                logger.info(f"Retrieved {len(rag_documents)} documents from RAG service (conversation-isolated)")
-            except Exception as rag_error:
-                logger.warning(f"RAG retrieval failed (non-critical): {rag_error}")
-                # Continue without RAG if retrieval fails
-                rag_documents = None
+        # Only retrieve files from session if the current request indicates files were uploaded
+        # This prevents triggering file upload workflow on normal prompts in sessions with previous uploads
+        if request.uploaded_files and len(request.uploaded_files) > 0:
+            logger.info(f"[CHAT] Files detected in current request: {request.uploaded_files}")
+            # Get file metadata from session for files that were just uploaded
+            if session and session.session_metadata and "uploaded_files" in session.session_metadata:
+                session_files = session.session_metadata.get("uploaded_files", [])
+                # Only use files that match the uploaded_files list from request
+                uploaded_files_info = [
+                    f for f in session_files 
+                    if f.get('name') in request.uploaded_files
+                ]
+                logger.info(f"[CHAT] Matched {len(uploaded_files_info)} files from session metadata")
+                if uploaded_files_info:
+                    logger.info(f"[CHAT] Files to process: {[f.get('name', 'unknown') for f in uploaded_files_info]}")
+        else:
+            logger.info(f"[CHAT] No files uploaded in current request - using text-only chat")
+            logger.info(f"[CHAT] Session has files from previous uploads, but NOT processing them (normal prompt)")
+
         
-        # Rewrite question to include uploaded file context
-        enriched_question = request.question
-        if request.uploaded_files:
-            file_context = ", ".join(request.uploaded_files)
-            logger.info(f"Files uploaded in this turn: {file_context}")
-            
-            # Rewrite question to include file context
-            enriched_question = f"{request.question} (Files: {file_context})"
-            logger.info(f"Original question: {request.question}")
-            logger.info(f"Enriched question: {enriched_question}")
-        
-        logger.info(f"Processing question for user {user_id}: {enriched_question[:50]}")
         answer, thinking_steps = await agent_instance.aquery(
-            enriched_question,  # Use enriched question with file context
+            request.question,  # Use original question, workflow will handle file context
             user_id=user_id, 
             session_id=session_id,
             conversation_history=conversation_history,
-            rag_documents=rag_documents,
+            uploaded_files=uploaded_files_info,  # Full metadata with path/type/size
             allow_tools=request.allow_tools,
-            use_rag=should_use_rag,
-            summarize_results=summarize_results
+            use_rag=use_rag
         )
         
         user_msg = ChatMessage(session_id=session_id, role="user", content=request.question)
         assistant_msg = ChatMessage(session_id=session_id, role="assistant", content=answer)
         db.add(user_msg)
         db.add(assistant_msg)
+        
+        # CRITICAL FIX: Clear uploaded_files from session_metadata after processing
+        # This prevents files from being re-ingested on subsequent prompts
+        if session and session.session_metadata and "uploaded_files" in session.session_metadata:
+            logger.info(f"Clearing uploaded_files from session_metadata after processing")
+            session_meta = session.session_metadata
+            session_meta["uploaded_files"] = []  # Clear the uploaded files list
+            session.session_metadata = session_meta
+        
         db.commit()
         db.refresh(assistant_msg)
         
@@ -771,73 +756,48 @@ async def chat_stream(
                 for msg in history
             ]
             
-            # Detect if user explicitly requests RAG
-            force_rag = False
-            rag_keywords = ["use rag", "con rag", "sử dụng rag", "với rag", "kèm rag", "dùng rag"]
-            if any(keyword.lower() in request.question.lower() for keyword in rag_keywords):
-                force_rag = True
-                logger.info(f"User explicitly requested RAG: {request.question[:50]}")
+            # Detect if user explicitly requests NO RAG (opt-out)
+            force_no_rag = False
+            no_rag_keywords = ["no rag", "không rag", "không dùng rag", "tắt rag", "disable rag"]
+            if any(keyword.lower() in request.question.lower() for keyword in no_rag_keywords):
+                force_no_rag = True
+                logger.info(f"User explicitly disabled RAG: {request.question[:50]}")
             
-            # Use RAG router to decide if documents are needed
-            should_use_rag = request.use_rag
-            routing_decision = None
+            # NOTE: RAG search now happens INSIDE the workflow (in RETRIEVE node)
+            # This allows file ingestion to happen BEFORE RAG search
+            # RAG is ENABLED by default, only disable if user explicitly requests it
+            use_rag = (request.use_rag and not force_no_rag) or (request.use_rag is True)
+            logger.info(f"RAG will be handled by workflow: use_rag={use_rag}")
             
-            if request.use_rag and not force_rag:
-                try:
-                    from ..services.rag_router import get_rag_router
-                    router = get_rag_router()
-                    should_use_rag, routing_decision = await router.should_use_rag(
-                        request.question,
-                        conversation_history
-                    )
-                    logger.info(f"RAG router decision: use_rag={should_use_rag}")
-                except Exception as router_error:
-                    logger.warning(f"RAG router error (defaulting to enabled): {router_error}")
-                    should_use_rag = True
-            elif force_rag:
-                should_use_rag = True
-                routing_decision = {
-                    "use_rag": True,
-                    "query_type": "explicit_rag_request",
-                    "confidence": 1.0,
-                    "reasoning": "User explicitly requested RAG"
-                }
+            # Stream RAG status
+            yield f'data: {json.dumps({"type": "rag_status", "used": use_rag, "note": "RAG handled by workflow after file ingestion"})}\n\n'
             
-            # Handle RAG document retrieval with conversation isolation
-            rag_documents = None
-            if should_use_rag:
-                try:
-                    from src.services.multi_collection_rag_service import get_rag_service
-                    rag_service = get_rag_service()
-                    rag_documents = rag_service.search(
-                        query=request.question,
-                        user_id=user_id,
-                        session_id=session_id,
-                        limit=3,
-                        include_global=True
-                    )
-                    logger.info(f"Retrieved {len(rag_documents)} documents from RAG (session-isolated)")
-                    # Stream RAG decision
-                    yield f'data: {json.dumps({"type": "rag_status", "used": True, "count": len(rag_documents)})}\n\n'
-                except Exception as rag_error:
-                    logger.warning(f"RAG retrieval failed: {rag_error}")
-                    rag_documents = None
-                    yield f'data: {json.dumps({"type": "rag_status", "used": False, "reason": str(rag_error)})}\n\n'
-            else:
-                yield f'data: {json.dumps({"type": "rag_status", "used": False})}\n\n'
-            
-            # Get uploaded file metadata from session
+            # Get full file metadata from session (has path, type, size, etc.)
+            # IMPORTANT: Only use files if they're explicitly passed in THIS request!
+            # Check if user actually uploaded files in this prompt (request.uploaded_files field)
             uploaded_files_info = []
-            if session and session.session_metadata and "uploaded_files" in session.session_metadata:
-                uploaded_files_info = session.session_metadata.get("uploaded_files", [])
-                if uploaded_files_info:
-                    file_names = [f["name"] for f in uploaded_files_info]
-                    logger.info(f"Files in this session: {', '.join(file_names)}")
+            logger.info(f"[CHAT-STREAM] Checking if files were uploaded in THIS request...")
+            logger.info(f"[CHAT-STREAM] request.uploaded_files: {request.uploaded_files}")
             
-            # IMPORTANT: Pass ORIGINAL question (not enriched) to workflow
-            # The workflow will handle files and decide how to use them
-            # Don't enrich the question here - let the workflow do it
-            logger.info(f"Processing question for user {user_id}: {request.question[:50]}")
+            # Only retrieve files from session if the current request indicates files were uploaded
+            # This prevents triggering file upload workflow on normal prompts in sessions with previous uploads
+            if request.uploaded_files and len(request.uploaded_files) > 0:
+                logger.info(f"[CHAT-STREAM] Files detected in current request: {request.uploaded_files}")
+                # Get file metadata from session for files that were just uploaded
+                if session and session.session_metadata and "uploaded_files" in session.session_metadata:
+                    session_files = session.session_metadata.get("uploaded_files", [])
+                    # Only use files that match the uploaded_files list from request
+                    uploaded_files_info = [
+                        f for f in session_files 
+                        if f.get('name') in request.uploaded_files
+                    ]
+                    logger.info(f"[CHAT-STREAM] Matched {len(uploaded_files_info)} files from session metadata")
+                    if uploaded_files_info:
+                        file_names = [f.get('name', 'unknown') for f in uploaded_files_info]
+                        logger.info(f"[CHAT-STREAM] Files to process: {', '.join(file_names)}")
+            else:
+                logger.info(f"[CHAT-STREAM] No files uploaded in current request - using text-only chat")
+                logger.info(f"[CHAT-STREAM] Session has files from previous uploads, but NOT processing them (normal prompt)")
             
             answer, thinking_steps = await agent_instance.aquery(
                 question=request.question,  # Original question, NOT enriched
@@ -845,9 +805,8 @@ async def chat_stream(
                 session_id=session_id,
                 conversation_history=conversation_history,
                 uploaded_files=uploaded_files_info,  # Pass file metadata to workflow
-                rag_documents=rag_documents,
                 allow_tools=request.allow_tools,
-                use_rag=should_use_rag
+                use_rag=use_rag
             )
             
             # Stream each thinking step as it was calculated
@@ -866,10 +825,19 @@ async def chat_stream(
                 session_id=session_id,
                 role="assistant",
                 content=answer,
-                message_meta={"message_type": "response", "rag_used": should_use_rag}
+                message_meta={"message_type": "response", "rag_used": use_rag}
             )
             db.add(user_msg)
             db.add(assistant_msg)
+            
+            # CRITICAL FIX: Clear uploaded_files from session_metadata after processing
+            # This prevents files from being re-ingested on subsequent prompts
+            if session and session.session_metadata and "uploaded_files" in session.session_metadata:
+                logger.info(f"Clearing uploaded_files from session_metadata after processing")
+                session_meta = session.session_metadata
+                session_meta["uploaded_files"] = []  # Clear the uploaded files list
+                session.session_metadata = session_meta
+            
             db.commit()
             db.refresh(assistant_msg)
             
@@ -1117,37 +1085,13 @@ async def search_documents(
     current_user: dict = Depends(get_current_user)
 ):
     """
+    DISABLED - RAG search now orchestrated by workflow only
     Search for documents using semantic search
-    Only returns documents uploaded by the current user
     """
-    try:
-        from src.services.multi_collection_rag_service import get_rag_service
-        
-        rag_service = get_rag_service()
-        results = rag_service.search(
-            query=request.query,
-            top_k=request.top_k,
-            user_id=current_user["user_id"]
-        )
-        
-        return DocumentSearchResponse(
-            query=request.query,
-            results=[
-                DocumentSearchResult(
-                    text=r['text'],
-                    title=r['title'],
-                    source=r['source'],
-                    doc_id=r['doc_id'],
-                    similarity=r['similarity']
-                )
-                for r in results
-            ],
-            total=len(results)
-        )
-    
-    except Exception as e:
-        logger.error(f"Error searching documents: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(
+        status_code=410,
+        detail="Document search endpoint disabled. Use /api/chat with uploaded files instead - RAG is orchestrated by workflow."
+    )
 
 
 class DocumentDeleteResponse(BaseModel):
@@ -1283,37 +1227,13 @@ async def get_document_chunks(
     db: Session = Depends(get_db)
 ):
     """
+    DISABLED - RAG orchestrated by workflow only
     Get all chunks for a specific document
-    Only the document owner can view chunks
     """
-    try:
-        from src.database.models import Document
-        from src.services.multi_collection_rag_service import get_rag_service
-        
-        # Verify ownership
-        doc = db.query(Document).filter(Document.id == doc_id).first()
-        if not doc:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        if doc.user_id != current_user["user_id"]:
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        # Get chunks from RAG service
-        rag_service = get_rag_service()
-        chunks = rag_service.get_document_chunks(doc_id)
-        
-        return DocumentChunkResponse(
-            doc_id=doc_id,
-            title=doc.filename.replace(Path(doc.filename).suffix, ''),
-            chunks=chunks,
-            total_chunks=len(chunks)
-        )
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting document chunks: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(
+        status_code=410,
+        detail="Document chunks endpoint disabled. RAG is orchestrated by workflow."
+    )
 
 
 class DocumentRegenerateResponse(BaseModel):
@@ -1330,45 +1250,13 @@ async def regenerate_document_embeddings(
     db: Session = Depends(get_db)
 ):
     """
-    Regenerate embeddings for a document (rebuild vector index)
-    Useful if embedding model was updated or corrupted
+    DISABLED - RAG orchestrated by workflow only
+    Regenerate embeddings for a document
     """
-    try:
-        from src.database.models import Document
-        from src.services.multi_collection_rag_service import get_rag_service
-        
-        # Verify ownership
-        doc = db.query(Document).filter(Document.id == doc_id).first()
-        if not doc:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        if doc.user_id != current_user["user_id"]:
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        # Get RAG service and regenerate
-        rag_service = get_rag_service()
-        success, message, new_chunks = rag_service.regenerate_embeddings(doc_id)
-        
-        if success:
-            # Update document chunk count
-            doc.chunk_count = new_chunks
-            db.commit()
-            
-            logger.info(f"Document {doc_id} embeddings regenerated ({new_chunks} chunks)")
-            return DocumentRegenerateResponse(
-                success=True,
-                message=message,
-                doc_id=doc_id,
-                new_chunks=new_chunks
-            )
-        else:
-            raise HTTPException(status_code=400, detail=message)
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error regenerating embeddings: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(
+        status_code=410,
+        detail="Document regeneration endpoint disabled. RAG is orchestrated by workflow."
+    )
 
 
 @app.get("/api/test")

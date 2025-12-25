@@ -108,15 +108,15 @@ class MultiCollectionRAGService:
         logger.info(f"  Dimensions: 384")
         logger.info(f"  Strategy: {embedding_method.lower()} embedding")
         
-        chunks_with_metadata = [
-            {
-                **chunk,
-                'title': title,
-                'source': source,
-                'doc_id': file_id,
-            }
-            for chunk in chunks
-        ]
+        # Only include non-empty title/source in metadata to avoid cluttering vectordb
+        chunks_with_metadata = []
+        for chunk in chunks:
+            chunk_meta = {**chunk, 'doc_id': file_id}
+            if title and title.strip():
+                chunk_meta['filename'] = title  # Use 'filename' instead of 'title'
+            if source and source.strip():
+                chunk_meta['source_file'] = source  # Use 'source_file' for clarity
+            chunks_with_metadata.append(chunk_meta)
         
         logger.info(f"[INGEST] Chunking: {len(chunks_with_metadata)} chunks created from {title}")
         
@@ -178,15 +178,15 @@ class MultiCollectionRAGService:
         logger.info(f"  Dimensions: 384")
         logger.info(f"  Strategy: {embedding_method.lower()} embedding")
         
-        chunks_with_metadata = [
-            {
-                **chunk,
-                'title': title,
-                'source': source,
-                'doc_id': file_id,
-            }
-            for chunk in chunks
-        ]
+        # Only include non-empty title/source in metadata to avoid cluttering vectordb
+        chunks_with_metadata = []
+        for chunk in chunks:
+            chunk_meta = {**chunk, 'doc_id': file_id}
+            if title and title.strip():
+                chunk_meta['filename'] = title  # Use 'filename' instead of 'title'
+            if source and source.strip():
+                chunk_meta['source_file'] = source  # Use 'source_file' for clarity
+            chunks_with_metadata.append(chunk_meta)
         
         logger.info(f"[INGEST-GLOBAL] Chunking: {len(chunks_with_metadata)} chunks created from {title}")
         
@@ -262,8 +262,8 @@ class MultiCollectionRAGService:
         include_global: bool = False,
     ) -> List[dict]:
         """
-        Search with 3-phase approach with detailed logging:
-        1. Exact filename match (if files uploaded)
+        Search with 4-phase approach with detailed logging:
+        1. Title/filename search (if files uploaded)
         2. Semantic + keyword hybrid search
         3. RRF ranking and deduplication
         
@@ -278,6 +278,13 @@ class MultiCollectionRAGService:
             limit: Max results to return (ignored - uses internal ranking)
             include_global: Whether to include global collection results
         """
+        # CRITICAL FIX: Ensure user collection exists before searching
+        user_collection = self.qd_manager._get_user_collection_name(user_id)
+        try:
+            self.qd_manager._ensure_collection_exists(user_collection)
+        except Exception as e:
+            logger.warning(f"Could not ensure collection {user_collection}: {e}")
+        
         # Normalize session_id parameter (accept both names for compatibility)
         actual_session_id = chat_session_id or session_id or None
         
@@ -286,21 +293,49 @@ class MultiCollectionRAGService:
         logger.info(f"  Session: {actual_session_id}")
         logger.info(f"  Files: {uploaded_filenames if uploaded_filenames else 'None'}")
         
-        # Phase 1: Filename extraction and boost setup
-        filename_boost = {}
+        # ========== PHASE 0: FILENAME METADATA SEARCH (PRIORITY!) ==========
+        # Check if filename was uploaded OR filename exists in query
+        filename_to_search = None
         if uploaded_filenames:
-            # Extract first filename only
-            first_file = uploaded_filenames[0] if uploaded_filenames else None
-            if len(uploaded_filenames) > 1:
-                logger.warning(f"  ⚠️  Multiple files provided ({len(uploaded_filenames)}), using first: {first_file}")
-            
-            if first_file:
-                logger.info(f"  ✓ File uploaded: {first_file}")
-                filename_boost[first_file] = 1.5  # 50% relevance boost
+            filename_to_search = uploaded_filenames[0]
+            logger.info(f"[RETRIEVE] ✓ File uploaded: {filename_to_search}")
+        else:
+            filename_to_search = self._extract_filename_from_query(query)
+            if filename_to_search:
+                logger.info(f"[RETRIEVE] ✓ Filename detected in query: {filename_to_search}")
         
-        # Phase 2: Semantic search with filename priority
-        semantic_results = self._semantic_search_with_filename_boost(
-            query, user_id, actual_session_id, filename_boost
+        # If we have a filename to search for, try dedicated filename metadata search
+        if filename_to_search:
+            filename_results = self.search_by_filename_metadata(
+                user_id=user_id,
+                filename=filename_to_search,
+                chat_session_id=actual_session_id,
+                limit=limit or settings.RAG_TOP_K_RESULTS
+            )
+            logger.info(f"[RETRIEVE] Phase 0 - Filename Metadata Search: {len(filename_results)} results")
+            
+            # ✅ IF FILENAME SEARCH FOUND RESULTS, SKIP ALL OTHER PHASES AND RETURN
+            if filename_results:
+                logger.info(f"[RETRIEVE] ✅ FILENAME SEARCH SUCCESSFUL - Skipping semantic/keyword/RRF phases")
+                # Format results for return (Qdrant results already ranked, no need for RRF)
+                formatted_results = []
+                for result in filename_results:
+                    formatted_results.append({
+                        "id": result.get("id", result.get("point_id")),
+                        "score": result.get("score", result.get("similarity", 1.0)),
+                        "doc": result,
+                        "source": result.get("source", ""),
+                        "text": result.get("text", "")
+                    })
+                logger.info(f"[RETRIEVE] ✓ Search completed - {len(formatted_results)} results returned (Phase 0 match)")
+                return formatted_results
+        
+        # ========== Continue with standard phases only if filename search returned nothing ==========
+        logger.info(f"[RETRIEVE] Phase 0 returned 0 results - Proceeding with semantic/keyword search")
+        
+        # Phase 1: Semantic search
+        semantic_results = self._semantic_search(
+            query, user_id, actual_session_id
         )
         logger.info(f"[RETRIEVE] Phase 1 - Semantic Search: {len(semantic_results)} results")
         for i, r in enumerate(semantic_results[:5]):
@@ -308,14 +343,14 @@ class MultiCollectionRAGService:
             fname = r.get('metadata', {}).get('filename', 'unknown')
             logger.info(f"    [{i+1}] {fname}: score={score:.3f}")
         
-        # Phase 3: Keyword search
+        # Phase 2: Keyword search
         keyword_results = self._keyword_search(query, user_id, actual_session_id)
         logger.info(f"[RETRIEVE] Phase 2 - Keyword Search: {len(keyword_results)} results")
         for i, r in enumerate(keyword_results[:3]):
             logger.info(f"    [{i+1}] {r.get('source', 'unknown')}")
         
-        # Phase 4: RRF ranking and filtering
-        threshold = 0.50 if uploaded_filenames else 0.30
+        # Phase 3: RRF ranking and filtering
+        threshold = 0.30
         final_results = self._apply_rrf_ranking_with_threshold(
             semantic_results, keyword_results, 
             threshold=threshold
@@ -373,9 +408,9 @@ class MultiCollectionRAGService:
         """
         try:
             # Generate query embedding from text
-            from src.core.embeddings import EmbeddingModel
-            embedding_model = EmbeddingModel()
-            query_embedding = embedding_model.embed_query(query)
+            from src.core.embeddings import get_embedding_strategy
+            embedding_strategy = get_embedding_strategy()
+            query_embedding = embedding_strategy.embed_single(query)
             
             # Use Qdrant manager's search method
             results = self.qd_manager.search(
@@ -409,8 +444,11 @@ class MultiCollectionRAGService:
         session_id: Optional[str] = None
     ) -> List[dict]:
         """
-        Perform keyword search using text matching.
+        Perform keyword search using text matching + filename extraction.
         Serves as secondary search for hybrid results.
+        
+        If query contains a filename pattern (e.g., "annual-report-2024.pdf"),
+        also search by that filename metadata.
         
         Args:
             query: Search query
@@ -428,6 +466,28 @@ class MultiCollectionRAGService:
                 chat_session_id=session_id,
                 limit=10
             )
+            
+            # Also extract and search for filenames in the query
+            # Pattern: filename.extension (e.g., "annual-report-2024.pdf")
+            import re
+            filename_pattern = r'[\w\-\s]+\.\w{2,4}'  # Match files with extensions
+            filenames = re.findall(filename_pattern, query)
+            
+            if filenames:
+                logger.debug(f"[KEYWORD] Extracted filenames from query: {filenames}")
+                for filename in filenames:
+                    # Search for this filename in metadata
+                    try:
+                        filename_results = self.qd_manager.search_by_keyword(
+                            query=filename,  # Search for the filename itself
+                            user_id=user_id,
+                            chat_session_id=session_id,
+                            limit=5
+                        )
+                        results.extend(filename_results)
+                        logger.debug(f"[KEYWORD] Filename '{filename}' search returned {len(filename_results)} results")
+                    except Exception as e:
+                        logger.debug(f"[KEYWORD] Filename search failed for '{filename}': {e}")
             
             # Convert to our format
             formatted_results = []
@@ -464,19 +524,31 @@ class MultiCollectionRAGService:
         
         # Semantic results (priority 1.2x)
         for i, result in enumerate(semantic):
+            if not result:
+                logger.warning(f"  Skipping None semantic result at index {i}")
+                continue
             doc_id = result.get("id")
+            if not doc_id:
+                logger.warning(f"  Skipping semantic result without id at index {i}")
+                continue
             score = (1.2 / (k + i + 1))
             scores[doc_id] = scores.get(doc_id, 0) + score
             doc_map[doc_id] = result
-            logger.debug(f"    Semantic[{i}]: {doc_id[:8]}... = {score:.3f}")
+            logger.debug(f"    Semantic[{i}]: {str(doc_id)[:8]}... = {score:.3f}")
         
         # Keyword results (priority 1.0x)
         for i, result in enumerate(keyword):
+            if not result:
+                logger.warning(f"  Skipping None keyword result at index {i}")
+                continue
             doc_id = result.get("id")
+            if not doc_id:
+                logger.warning(f"  Skipping keyword result without id at index {i}")
+                continue
             score = (1.0 / (k + i + 1))
             scores[doc_id] = scores.get(doc_id, 0) + score
             doc_map[doc_id] = result
-            logger.debug(f"    Keyword[{i}]: {doc_id[:8]}... = {score:.3f}")
+            logger.debug(f"    Keyword[{i}]: {str(doc_id)[:8]}... = {score:.3f}")
         
         # Filter by threshold and sort
         ranked = [
@@ -488,7 +560,7 @@ class MultiCollectionRAGService:
         
         logger.info(f"  Phase 3 (RRF) filtered: {len(ranked)} results above threshold {threshold}")
         for r in ranked[:5]:
-            logger.info(f"    {r['id'][:8]}... = {r['score']:.3f}")
+            logger.info(f"    {str(r['id'])[:8]}... = {r['score']:.3f}")
         
         return ranked[:10]  # Return top 10
     
@@ -516,37 +588,41 @@ class MultiCollectionRAGService:
         
         return "\n\n".join(parts)
     
-    def search_by_filename(self,
-                          user_id: str,
-                          filename: str,
-                          chat_session_id: Optional[str] = None,
-                          limit: Optional[int] = None) -> List[Dict]:
-        """Search for documents by specific filename (metadata search)
+    def search_by_filename_metadata(self,
+                                    user_id: str,
+                                    filename: str,
+                                    chat_session_id: Optional[str] = None,
+                                    limit: Optional[int] = None) -> List[Dict]:
+        """Dedicated metadata-only filename search
         
-        ALWAYS enforces chat_session_id for conversation isolation
+        Searches ONLY by filename. Returns results WITHOUT going through semantic/keyword/RRF phases.
+        If this finds results, other search phases are SKIPPED.
+        
+        Searches using: user_id + chat_session_id + filename (personal collection)
         """
         limit = limit or settings.RAG_TOP_K_RESULTS
-        logger.info(f"Searching by filename: {filename}, session={chat_session_id}")
+        logger.info(f"[FILENAME-METADATA SEARCH] Filename: {filename}, user={user_id}, session={chat_session_id}")
         
         try:
-            collection_name = self.qd_manager._get_user_collection_name(user_id)
-            
-            # Build metadata filter for filename
-            metadata_filters = {
-                'source': filename
-            }
-            
-            results = self.qd_manager.search_by_metadata(
-                collection_name=collection_name,
-                metadata_filters=metadata_filters,
+            # Search by filename using Qdrant search
+            results = self.qd_manager.search(
+                user_id=user_id,
+                query_embedding=None,
+                query_text=filename,
                 chat_session_id=chat_session_id,
-                limit=limit
+                limit=limit,
+                include_global=False
             )
             
-            logger.info(f"Filename search returned {len(results)} results for {filename}")
+            logger.info(f"[FILENAME-METADATA SEARCH] ✓ Found {len(results)} results")
+            if results:
+                logger.info(f"[FILENAME-METADATA SEARCH] ✓ Results found - SKIPPING semantic/keyword/RRF phases")
+                for i, r in enumerate(results[:3]):
+                    logger.info(f"    [{i+1}] {r.get('source', 'unknown')}")
             return results
+            
         except Exception as e:
-            logger.error(f"Filename search failed: {e}")
+            logger.error(f"[FILENAME-METADATA SEARCH] Failed: {e}")
             return []
     
     def search_by_title(self,

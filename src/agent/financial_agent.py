@@ -56,6 +56,15 @@ class FinancialAgent:
         # Get LLM from factory
         self.llm = LLMFactory.get_llm()
         
+        # Initialize RAG service for workflow access
+        try:
+            from ..services.multi_collection_rag_service import get_rag_service
+            self.rag_service = get_rag_service()
+            logger.info("✅ RAG service initialized")
+        except Exception as e:
+            logger.warning(f"❌ RAG service initialization failed: {e}")
+            self.rag_service = None
+        
         # Get all tools (config-filtered)
         self.tools = get_all_tools(self.config)
         tool_names = []
@@ -600,16 +609,14 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         Async query - Main entry point using simplified 2-node LangGraph workflow.
         
         ARCHITECTURE:
-        1. API Level (this method):
-           - File handling detection (new!)
-           - Query rewriting (disambiguation)
-           - RAG retrieval (dual search + filtering)
-           - Conversation context assembly
-        
-        2. Workflow Level (langgraph_workflow):
-           - Agent node: LLM decision (tool selection)
-           - Tools node: Execute selected tools
-           - Agent node: Final synthesis
+        The workflow handles ALL processing:
+        1. File extraction (if files uploaded)
+        2. File ingestion into vectordb (if files uploaded)
+        3. RAG retrieval (if RAG enabled)
+        4. Query classification and routing
+        5. Tool selection and execution
+        6. Response generation
+        7. Output formatting
         
         Args:
             question: User's question (Vietnamese)
@@ -617,7 +624,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             session_id: Session ID for context
             conversation_history: Previous messages (list of dicts with 'role' and 'content')
             uploaded_files: List of file metadata dicts (name, type, path, size, extension) for workflow
-            rag_documents: Pre-retrieved RAG documents (optional)
+            rag_documents: Pre-retrieved RAG documents (optional, legacy support)
             allow_tools: Whether tools can be called
             use_rag: Whether RAG is enabled
             summarize_results: Whether to summarize tool outputs
@@ -630,14 +637,13 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             logger.info(f"Processing question for user {user_id} in session {session_id}: {question}")
             logger.info(f"{'='*30}")
             
-            # ========== PHASE 1: QUERY REWRITING (API LEVEL) ==========
-            logger.info("="*30)
-            logger.info("🔄 QUERY REWRITING PHASE")
-            logger.info("="*30)
+            # ========== PHASE 0: MINIMAL PREPROCESSING (OPTIONAL) ==========
+            # Only handle query rewriting if it's a complex multi-part query
+            # Most processing moves to workflow
             
             rewritten_question = question
             
-            # Skip rewriting for greetings and simple queries
+            # Skip rewriting for greetings
             import re
             greeting_patterns = [
                 r"^\s*(hello|hi|xin chào|chào|how are you|thanks|thank you|cảm ơn|goodbye|bye|tạm biệt|what'?s?\s+up|who are you|bạn là ai)\s*[\.\?\!]*\s*$",
@@ -645,89 +651,12 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             ]
             is_greeting = any(re.match(p, question.lower().strip(), re.IGNORECASE) for p in greeting_patterns)
             
-            if is_greeting:
+            if not is_greeting:
                 logger.info(f"Original query: {question}")
-                logger.info("✓ Query is a greeting - skipping rewriting")
-            # Check if query is clear and rewrite if needed
-            elif hasattr(self, '_is_query_clear') and not self._is_query_clear(question):
-                try:
-                    rewritten_question, reason = await asyncio.to_thread(
-                        self.rewrite_query_with_context_sync,
-                        question,
-                        conversation_history or []
-                    )
-                    logger.info(f"Original query: {question}")
-                    logger.info(f"Rewritten query: {rewritten_question}")
-                    logger.info(f"Reason: {reason}")
-                except Exception as e:
-                    logger.warning(f"Rewrite failed: {e}, using original")
-                    rewritten_question = question
             else:
-                logger.info(f"Original query: {question}")
-                logger.info("✓ Query is clear and specific - no rewriting needed")
+                logger.info(f"Query: {question} (greeting detected)")
             
-            # ========== PHASE 2: RAG RETRIEVAL (API LEVEL) ==========
-            logger.info("📚 CONVERSATION CONTEXT")
-            
-            # Convert conversation_history from dict format to message objects
-            if not conversation_history:
-                conversation_history = []
-            
-            # Log conversation context
-            if conversation_history:
-                logger.info(f"   Added {len(conversation_history)} recent messages ({len(conversation_history)//2} exchanges)")
-            
-            # Retrieve RAG documents if enabled
-            rag_results = []
-            if use_rag:
-                logger.info("📖 RAG CONTEXT INTEGRATION")
-                
-                try:
-                    from ..services.multi_collection_rag_service import get_rag_service
-                    rag_service = get_rag_service()
-                    
-                    # Use pre-provided RAG documents or retrieve new ones
-                    if rag_documents:
-                        rag_results = rag_documents
-                        logger.info(f"   Using pre-provided {len(rag_documents)} document(s)")
-                    else:
-                        # Perform RAG search with the rewritten query
-                        rag_results = rag_service.search(
-                            query=rewritten_question,
-                            user_id=user_id or "default",
-                            session_id=session_id or "default"
-                        )
-                    
-                    # Filter by relevance threshold
-                    filtered_results = []
-                    for result in rag_results:
-                        similarity = result.get('score', result.get('similarity', 0))
-                        if similarity >= 0.30:  # Phase 2C fix: relevance threshold
-                            filtered_results.append(result)
-                    
-                    logger.info(f"   RAG document similarities: {[str(round(r.get('score', r.get('similarity', 0)), 2)) for r in rag_results]}")
-                    logger.info(f"   Filtered RAG results: {len(rag_results)} → {len(filtered_results)} relevant documents (threshold: 0.30)")
-                    
-                    # Log full retrieved documents
-                    if filtered_results:
-                        logger.info("   Retrieved Documents:")
-                        for i, doc in enumerate(filtered_results, 1):
-                            title = doc.get('title', 'Unknown')
-                            score = doc.get('score', doc.get('similarity', 0))
-                            content = doc.get('content', doc.get('text', ''))[:500]
-                            logger.info(f"   [{i}] {title} (relevance: {score:.1%})")
-                            logger.info(f"       Content: {content}...")
-                    else:
-                        logger.info("⚠️  NO RAG DOCUMENTS")
-                        logger.info("   RAG was enabled but no documents matched relevance threshold")
-                    
-                    rag_results = filtered_results
-                    
-                except Exception as e:
-                    logger.warning(f"RAG retrieval failed: {e}")
-                    rag_results = []
-            
-            # ========== PHASE 3: BUILD MESSAGE HISTORY FOR WORKFLOW ==========
+            # ========== PHASE 1: BUILD MESSAGE HISTORY ==========
             
             # Convert conversation_history to LangChain message objects if needed
             from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
@@ -750,15 +679,15 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             # Add current question as HumanMessage
             workflow_messages.append(HumanMessage(content=question))
             
-            # ========== PHASE 4: SELECT AND INVOKE WORKFLOW ==========
+            # ========== PHASE 2: INVOKE WORKFLOW IMMEDIATELY ==========
             logger.info("="*50)
-            logger.info("🚀 WORKFLOW SELECTION & INVOCATION")
+            logger.info("🚀 WORKFLOW INVOCATION (IMMEDIATE)")
             logger.info("="*50)
             logger.info(f"User prompt: {question}")
-            logger.info(f"Rewritten: {rewritten_question}")
             logger.info(f"Files: {len(uploaded_files) if uploaded_files else 0}")
             logger.info(f"History messages: {len(workflow_messages)}")
-            logger.info(f"RAG results: {len(rag_results)}")
+            logger.info(f"RAG enabled: {use_rag}")
+            logger.info("Note: All processing (file ingestion, RAG, tools) handled by workflow")
             
             # Determine which workflow version to use for this user
             from ..core.config import settings
@@ -771,14 +700,19 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             
             # Invoke the selected workflow
             if selected_version == "v4" and self.langgraph_workflow_v4:
-                logger.info(f"\n➡️  Using V4 (13-node complete architecture)")
+                logger.info(f"➡️  Using V4 (13-node complete architecture)")
+                logger.info(f"[INVOKE] Passing to workflow:")
+                logger.info(f"[INVOKE]   - uploaded_files type: {type(uploaded_files)}")
+                logger.info(f"[INVOKE]   - uploaded_files length: {len(uploaded_files) if uploaded_files else 0}")
+                if uploaded_files:
+                    logger.info(f"[INVOKE]   - uploaded_files content: {uploaded_files}")
                 final_state = await self.langgraph_workflow_v4.invoke(
                     user_prompt=question,
                     uploaded_files=uploaded_files or [],
                     conversation_history=workflow_messages,
                     user_id=user_id or "default",
                     session_id=session_id or "default",
-                    rag_results=rag_results,
+                    use_rag=use_rag,
                     tools_enabled=allow_tools
                 )
             elif selected_version == "v3" and self.langgraph_workflow_v3:
@@ -789,7 +723,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                     conversation_history=workflow_messages,
                     user_id=user_id or "default",
                     session_id=session_id or "default",
-                    rag_results=rag_results,
+                    use_rag=use_rag,
                     tools_enabled=allow_tools
                 )
             else:
@@ -800,11 +734,11 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                     conversation_history=workflow_messages,
                     user_id=user_id or "default",
                     session_id=session_id or "default",
-                    rag_results=rag_results,
+                    use_rag=use_rag,
                     tools_enabled=allow_tools
                 )
             
-            # ========== PHASE 5: EXTRACT AND RETURN ANSWER ==========
+            # ========== PHASE 3: EXTRACT AND RETURN ANSWER ==========
             logger.info("="*30)
             logger.info("📝 EXTRACTING FINAL ANSWER")
             logger.info("="*30)
@@ -816,30 +750,30 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             logger.info(f"Answer length: {len(answer)} chars")
             logger.info(f"Full Answer:")
             logger.info(f"{answer}")
-            logger.info(f"\n✅ ANSWER READY FOR USER {user_id}")
+            logger.info(f"✅ ANSWER READY FOR USER {user_id}")
             logger.info(f"   Final length: {len(answer)} chars")
             
             # Build thinking steps from workflow result
             thinking_steps = [
                 {
                     "step": 1,
-                    "title": "🔍 Query Analysis",
-                    "description": "Analyzed and rewritten query for clarity"
+                    "title": "🔍 Query Processing",
+                    "description": "Classified and processed query in workflow"
                 },
                 {
                     "step": 2,
                     "title": "📚 Document Retrieval",
-                    "description": f"Retrieved {len(rag_results)} relevant documents via RAG"
+                    "description": "Retrieved relevant documents via RAG (if enabled)"
                 },
                 {
                     "step": 3,
                     "title": "🤖 Processing with Agent",
-                    "description": "Agent analyzed context and decided on tools"
+                    "description": "Agent analyzed context and executed tools"
                 },
                 {
                     "step": 4,
                     "title": "✅ Answer Ready",
-                    "description": f"Generated final answer using LLM + context"
+                    "description": "Generated final answer"
                 }
             ]
             

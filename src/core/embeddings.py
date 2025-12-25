@@ -9,6 +9,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Track first embedding model use
+_embedding_first_use = True
+
 
 class EmbeddingModelType(str, Enum):
     FIN_E5_SMALL = "fin-e5-small"
@@ -34,6 +37,7 @@ class EmbeddingStrategy(ABC):
 
 class SingleDenseEmbedding(EmbeddingStrategy):
     def __init__(self, model_name: str = None, model_type: str = "general"):
+        global _embedding_first_use
         self.model_type = model_type
         if model_name:
             self.model_name = model_name
@@ -47,6 +51,18 @@ class SingleDenseEmbedding(EmbeddingStrategy):
             self.model = SentenceTransformer(self.model_name)
             self._dim = self.model.get_sentence_embedding_dimension()
             logger.info(f"Loaded embedding model ({model_type}): {self.model_name}, dim={self._dim}")
+            
+            # Log first actual use of embedding model
+            if _embedding_first_use:
+                _embedding_first_use = False
+                separator = "x" * 50
+                logger.info(separator)
+                logger.info("EMBEDDING MODEL ACTIVATION - FIRST USE")
+                logger.info(f"Model: {self.model_name}")
+                logger.info(f"Type: {model_type.upper()}")
+                logger.info(f"Dimension: {self._dim}")
+                logger.info(f"Strategy: {settings.CHUNK_EMBEDDING_STRATEGY}")
+                logger.info(separator)
         except Exception as e:
             logger.warning(f"Failed to load {self.model_name}: {e}, falling back to default")
             self.model = SentenceTransformer("all-MiniLM-L6-v2")

@@ -71,7 +71,7 @@ class LangGraphWorkflowV4:
         """Build the complete 13-node workflow graph"""
         workflow = StateGraph(WorkflowState)
         
-        # Add all 13 nodes
+        # Add all 14 nodes (13 original + 1 reformulation)
         workflow.add_node("prompt_handler", self.node_prompt_handler)
         workflow.add_node("file_handler", self.node_file_handler)
         workflow.add_node("classify", self.node_classify)
@@ -83,6 +83,7 @@ class LangGraphWorkflowV4:
         workflow.add_node("rewrite_convo", self.node_rewrite_conversation_context)
         workflow.add_node("retrieve", self.node_retrieve)
         workflow.add_node("filter", self.node_filter)
+        workflow.add_node("query_reformulation", self.node_query_reformulation)
         workflow.add_node("analyze", self.node_analyze)
         workflow.add_node("select_tools", self.node_select_tools)
         workflow.add_node("generate", self.node_generate)
@@ -142,7 +143,8 @@ class LangGraphWorkflowV4:
         
         # Main retrieval pipeline
         workflow.add_edge("retrieve", "filter")
-        workflow.add_edge("filter", "analyze")
+        workflow.add_edge("filter", "query_reformulation")
+        workflow.add_edge("query_reformulation", "analyze")
         workflow.add_edge("analyze", "select_tools")
         workflow.add_edge("select_tools", "generate")
         
@@ -189,6 +191,9 @@ class LangGraphWorkflowV4:
     async def node_prompt_handler(self, state: WorkflowState) -> Dict[str, Any]:
         """Entry point: Route based on prompt presence"""
         try:
+            separator = "|" * 25
+            logger.info(f"{separator} PROMPT HANDLER START {separator}")
+            
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started(
                     "PROMPT_HANDLER",
@@ -196,6 +201,7 @@ class LangGraphWorkflowV4:
                 )
             
             # Validation happens at routing
+            logger.info(f"{separator} PROMPT HANDLER COMPLETE {separator}")
             return state
         except Exception as e:
             logger.error(f"Prompt handler failed: {e}")
@@ -234,6 +240,8 @@ class LangGraphWorkflowV4:
             
             prompt = state.get("user_prompt", "").lower().strip()
             has_files = bool(state.get("uploaded_files"))
+            is_greeting = False  # Initialize here to avoid undefined variable
+            confidence = 0.50
             
             # If files are uploaded, prioritize file operation over greeting detection
             if has_files:
@@ -274,6 +282,7 @@ class LangGraphWorkflowV4:
                     metadata={
                         "type": state["prompt_type"].value if state.get("prompt_type") else "unknown",
                         "confidence": confidence,
+                        "has_files": has_files,
                         "is_greeting": is_greeting
                     }
                 )
@@ -337,8 +346,11 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
         return state
     
     async def node_extract_file(self, state: WorkflowState) -> Dict[str, Any]:
-        """Extract and process uploaded files"""
+        """Extract and process uploaded files from session metadata"""
         try:
+            separator = "|" * 25
+            logger.info(f"{separator} FILE EXTRACTION START {separator}")
+            
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started(
                     "EXTRACT_FILE",
@@ -353,15 +365,22 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
                     await self.observer.emit_step_skipped(
                         "EXTRACT_FILE", "No files provided"
                     )
+                logger.info(f"{separator} FILE EXTRACTION COMPLETE {separator}")
                 return state
             
             file_metadata = []
-            for file_obj in uploaded_files:
+            for file_info in uploaded_files:
+                # Extract path from file info dict (from session metadata)
+                file_path = file_info.get("path") if isinstance(file_info, dict) else getattr(file_info, "path", None)
+                file_name = file_info.get("name") if isinstance(file_info, dict) else getattr(file_info, "filename", getattr(file_info, "name", "unknown"))
+                file_type = file_info.get("type") if isinstance(file_info, dict) else "unknown"
+                
                 metadata = {
-                    "filename": getattr(file_obj, "filename", getattr(file_obj, "name", "unknown")),
-                    "size": getattr(file_obj, "size", 0),
-                    "content_type": getattr(file_obj, "content_type", "unknown"),
-                    "doc_id": getattr(file_obj, "doc_id", None)
+                    "filename": file_name,
+                    "size": file_info.get("size", 0) if isinstance(file_info, dict) else getattr(file_info, "size", 0),
+                    "file_type": file_type,
+                    "file_path": file_path,
+                    "extension": file_info.get("extension", "") if isinstance(file_info, dict) else ""
                 }
                 file_metadata.append(metadata)
             
@@ -374,6 +393,7 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
                 )
             
             logger.info(f"Extracted {len(file_metadata)} files")
+            logger.info(f"{separator} FILE EXTRACTION COMPLETE {separator}")
         except Exception as e:
             logger.error(f"File extraction failed: {e}")
             state["file_metadata"] = []
@@ -383,8 +403,11 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
         return state
     
     async def node_ingest_file(self, state: WorkflowState) -> Dict[str, Any]:
-        """Ingest files into RAG system"""
+        """Ingest files into RAG system - Extract, chunk, and vectorize"""
         try:
+            separator = "|" * 25
+            logger.info(f"{separator} FILE INGESTION START {separator}")
+            
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started(
                     "INGEST_FILE",
@@ -401,15 +424,150 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
                     )
                 return state
             
-            state["files_ingested"] = True
+            user_id = state.get("user_id")
+            session_id = state.get("session_id")
+            
+            if not user_id or not session_id:
+                logger.warning("Missing user_id or session_id for file ingestion")
+                return state
+            
+            # Import file processing tools
+            from ..tools.pdf_tools import analyze_pdf
+            from ..tools.excel_tools import analyze_excel_to_markdown
+            import uuid
+            from pathlib import Path
+            import os
+            
+            rag_service = getattr(self.agent, 'rag_service', None)
+            if not rag_service:
+                logger.warning("RAG service not available for file ingestion")
+                state["files_ingested"] = False
+                return state
+            
+            total_chunks = 0
+            failed_files = []
+            for file_info in file_metadata:
+                temp_file_path = None
+                try:
+                    # Try both "file_path" and "path" keys for compatibility
+                    file_path = file_info.get("file_path") or file_info.get("path")
+                    file_name = file_info.get("filename") or file_info.get("name", "unknown")
+                    file_type = file_info.get("file_type") or file_info.get("type", "unknown")
+                    temp_file_path = file_path  # Store for cleanup
+                    
+                    if not file_path:
+                        error_msg = f"CRITICAL: File path is None for {file_name}. File metadata: {file_info}"
+                        logger.error(error_msg)
+                        failed_files.append((file_name, "No file path provided"))
+                        continue
+                    
+                    if not Path(file_path).exists():
+                        error_msg = f"File not found at path: {file_path}"
+                        logger.error(error_msg)
+                        failed_files.append((file_name, f"File not found: {file_path}"))
+                        continue
+                    
+                    file_id = str(uuid.uuid4())
+                    extracted_text = None
+                    
+                    # Extract based on file type
+                    if file_type == "pdf":
+                        try:
+                            # NOTE: analyze_pdf returns PDFAnalysisResult (Pydantic model), not dict
+                            pdf_result = analyze_pdf(file_path)
+                            # Extract text from PDFAnalysisResult object
+                            extracted_text = pdf_result.extracted_text or ""
+                            if pdf_result.tables_markdown:
+                                extracted_text += f"\n\n## Tables\n\n{pdf_result.tables_markdown}"
+                            logger.info(f"PDF extracted: {file_name}")
+                        except Exception as pdf_err:
+                            logger.error(f"PDF extraction failed for {file_name}: {pdf_err}")
+                    elif file_type == "excel":
+                        try:
+                            excel_result = analyze_excel_to_markdown(file_path)
+                            extracted_text = excel_result.get("markdown", "") or excel_result.get("text", "")
+                            logger.info(f"Excel extracted: {file_name}")
+                        except Exception as excel_err:
+                            logger.error(f"Excel extraction failed for {file_name}: {excel_err}")
+                    elif file_type == "image":
+                        try:
+                            from ..tools.pdf_tools import extract_text_from_image
+                            extracted_text = extract_text_from_image(file_path)
+                            logger.info(f"Image OCR: {file_name}")
+                        except Exception as img_err:
+                            logger.error(f"Image extraction failed for {file_name}: {img_err}")
+                    else:
+                        # Try reading as text
+                        try:
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                extracted_text = f.read()
+                        except:
+                            logger.warning(f"Could not extract text from {file_name}")
+                    
+                    if extracted_text and extracted_text.strip():
+                        # Chunk and ingest into vectordb
+                        try:
+                            chunks = rag_service.chunk_text(extracted_text, chunk_size=500, overlap=50)
+                            logger.info(f"Created {len(chunks)} chunks from {file_name}")
+                            
+                            if chunks:
+                                chunk_count = rag_service.qd_manager.add_document_chunks(
+                                    user_id=user_id,
+                                    chat_session_id=session_id,
+                                    file_id=file_id,
+                                    chunks=chunks,
+                                    metadata={"filename": file_name, "file_type": file_type}
+                                )
+                                total_chunks += chunk_count
+                                logger.info(f"✅ Ingested {chunk_count} chunks from {file_name} into vectordb")
+                            else:
+                                error_msg = f"No chunks created from {file_name} (may be empty or invalid format)"
+                                logger.error(error_msg)
+                                failed_files.append((file_name, "No chunks created"))
+                        except Exception as chunk_err:
+                            error_msg = f"Chunk/ingest error for {file_name}: {chunk_err}"
+                            logger.error(error_msg)
+                            failed_files.append((file_name, str(chunk_err)))
+                    else:
+                        error_msg = f"No text extracted from {file_name}"
+                        logger.error(error_msg)
+                        failed_files.append((file_name, "No text extracted"))
+                except Exception as file_err:
+                    logger.error(f"File ingestion error for {file_info.get('filename')}: {file_err}")
+                finally:
+                    # CLEANUP: Delete temporary file after processing
+                    if temp_file_path and Path(temp_file_path).exists():
+                        try:
+                            os.remove(temp_file_path)
+                            logger.info(f"✓ Deleted temporary file: {temp_file_path}")
+                        except Exception as cleanup_err:
+                            logger.warning(f"Could not delete temp file {temp_file_path}: {cleanup_err}")
+            
+            # Mark as ingested only if chunks were actually created
+            state["files_ingested"] = total_chunks > 0
+            state["ingested_chunks"] = total_chunks
+            state["failed_files"] = failed_files  # Track failed files for retrieval logic
+            
+            logger.info(f"="*60)
+            logger.info(f"FILE INGESTION SUMMARY")
+            logger.info(f"="*60)
+            logger.info(f"Files processed: {len(file_metadata)}")
+            logger.info(f"Total chunks created: {total_chunks}")
+            logger.info(f"Successfully ingested: {len(file_metadata) - len(failed_files)}")
+            if failed_files:
+                logger.error(f"FAILED INGESTION:")
+                for fname, reason in failed_files:
+                    logger.error(f"  - {fname}: {reason}")
+            logger.info(f"="*60)
             
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_completed(
                     state["_step"],
-                    metadata={"files_ingested": True}
+                    metadata={"files_processed": len(file_metadata), "chunks": total_chunks}
                 )
             
-            logger.info(f"Ingested {len(file_metadata)} files")
+            logger.info(f"Ingested {len(file_metadata)} files with {total_chunks} total chunks")
+            logger.info(f"{separator} FILE INGESTION COMPLETE {separator}")
         except Exception as e:
             logger.error(f"File ingestion failed: {e}")
             state["files_ingested"] = False
@@ -526,14 +684,60 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
     async def node_retrieve(self, state: WorkflowState) -> Dict[str, Any]:
         """Retrieve with personal-first, global-fallback strategy"""
         try:
+            separator = "|" * 25
+            logger.info(f"{separator} RETRIEVAL START {separator}")
+            
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started("RETRIEVE")
+            
+            # Check if RAG is enabled for this request
+            rag_enabled = state.get("rag_enabled", True)
+            if not rag_enabled:
+                logger.info("RAG disabled - skipping retrieval")
+                if self.observer and state.get("_step"):
+                    await self.observer.emit_step_skipped(state["_step"], "RAG disabled")
+                return state
             
             query = state.get("rewritten_prompt") or state.get("user_prompt")
             user_id = state.get("user_id")
             session_id = state.get("session_id")
             
-            results = await self.retrieval.retrieve_with_fallback(query, user_id, session_id)
+            # Extract uploaded filenames for retrieval priority
+            uploaded_filenames = None
+            uploaded_files = state.get("uploaded_files", [])
+            if uploaded_files:
+                # Extract filenames from uploaded_files metadata
+                # Note: files have 'name' field, not 'filename'
+                uploaded_filenames = [f.get("name", "") for f in uploaded_files if f.get("name")]
+                if uploaded_filenames:
+                    logger.info(f"Passing {len(uploaded_filenames)} uploaded filenames to retrieval: {uploaded_filenames}")
+                else:
+                    logger.warning(f"[RETRIEVE] No 'name' field found in uploaded_files: {uploaded_files}")
+            
+            # FALLBACK: If no filenames from state, extract from query
+            # This handles case where files were ingested but metadata wasn't propagated
+            if not uploaded_filenames and query:
+                logger.info(f"[RETRIEVE] No uploaded filenames from state - attempting to extract from query")
+                import re
+                # Look for common file patterns in the query
+                filename_pattern = r'([a-zA-Z0-9_\-\.]+\.(pdf|xlsx?|csv|docx?|pptx?|txt))'
+                filename_matches = re.findall(filename_pattern, query, re.IGNORECASE)
+                
+                if filename_matches:
+                    # Extract just the filename part (re.findall returns tuples)
+                    extracted_filenames = [match[0] if isinstance(match, tuple) else match for match in filename_matches]
+                    # Remove duplicates while preserving order
+                    seen = set()
+                    uploaded_filenames = [f for f in extracted_filenames if not (f in seen or seen.add(f))]
+                    logger.info(f"[RETRIEVE] Extracted {len(uploaded_filenames)} filename(s) from query: {uploaded_filenames}")
+                else:
+                    logger.info(f"[RETRIEVE] No filenames found in query - proceeding without file context")
+            
+            logger.info(f"Starting RAG retrieval (files may have been ingested)")
+            
+            results = await self.retrieval.retrieve_with_fallback(
+                query, user_id, session_id, uploaded_filenames=uploaded_filenames
+            )
             
             state["personal_semantic_results"] = results.get("personal_semantic", [])
             state["personal_keyword_results"] = results.get("personal_keyword", [])
@@ -541,13 +745,28 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
             state["global_keyword_results"] = results.get("global_keyword", [])
             state["rag_enabled"] = results.get("total_results", 0) > 0
             
+            # Log database reasoning
+            db_reasoning = results.get("db_reasoning", "")
+            if db_reasoning:
+                logger.info(f"[DB DECISION] {db_reasoning}")
+            
+            total = results.get("total_results", 0)
+            if total == 0:
+                logger.warning(f"⚠️  NO RAG RESULTS: Query returned 0 results from vectordb")
+                logger.info(f"   - Check if files were successfully ingested")
+                logger.info(f"   - Check if vectordb has data for user: {user_id}")
+                logger.info(f"   - Query: {query[:100]}...")
+            else:
+                logger.info(f"✅ Retrieved {total} results from RAG")
+            
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_completed(
                     state["_step"],
-                    output_size=results.get("total_results", 0) * 500  # Est. bytes
+                    output_size=total * 500  # Est. bytes
                 )
             
-            logger.info(f"Retrieved {results.get('total_results', 0)} results")
+            logger.info(f"Retrieved {total} results (files now in collection)")
+            logger.info(f"{separator} RETRIEVAL COMPLETE {separator}")
         except Exception as e:
             logger.error(f"Retrieval failed: {e}")
             state["rag_enabled"] = False
@@ -586,9 +805,141 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
         
         return state
     
+    async def node_query_reformulation(self, state: WorkflowState) -> Dict[str, Any]:
+        """
+        Query Reformulation Node - Rewrite query with retrieved context
+        
+        Purpose:
+        - After retrieval and filtering, if results exist from either/both collections
+        - Combine original query + retrieved context to create an enriched query
+        - Feeds into subsequent reasoning steps with full context available
+        
+        This allows the LLM to reason with provided information rather than raw question
+        """
+        try:
+            if self.observer:
+                state["_step"] = await self.observer.emit_step_started("QUERY_REFORMULATION")
+            
+            original_query = state.get("user_prompt", "").strip()
+            best_results = state.get("best_search_results", [])
+            
+            # Log separator for reformulation start
+            separator = "|" * 25
+            logger.info(f"{separator} QUERY REFORMULATION START {separator}")
+            logger.info(f"Original Query: {original_query}")
+            logger.info(f"Available Context: {len(best_results)} retrieved results")
+            
+            # Only reformulate if we have both results and a query
+            if not best_results or not original_query:
+                logger.info("No results to reformulate with - using original query")
+                state["reformulated_query"] = original_query
+                state["reformulation_context"] = ""
+                if self.observer and state.get("_step"):
+                    await self.observer.emit_step_skipped(
+                        state["_step"],
+                        f"Insufficient context: {len(best_results)} results, query_len={len(original_query)}"
+                    )
+                logger.info(f"{separator} QUERY REFORMULATION SKIPPED {separator}")
+                return state
+            
+            # Build context summary from retrieved results with FULL content
+            context_snippets = []
+            context_full = []
+            for i, result in enumerate(best_results[:5], 1):  # Use top 5 results
+                # Results can have 'text' or 'content' field depending on source
+                content_full = result.get("text") or result.get("content", "")
+                content_preview = content_full[:200] if content_full else ""  # Preview for logs
+                score = result.get("score", 0)
+                source = result.get("source", result.get("title", "unknown"))
+                
+                # For logging preview (show first 200 chars)
+                if content_preview:
+                    context_snippets.append(f"[{i}] ({source}, relevance: {score:.2f}): {content_preview}...")
+                else:
+                    context_snippets.append(f"[{i}] ({source}, relevance: {score:.2f}): [No content]")
+                
+                # For LLM reformulation (use FULL content)
+                if content_full:
+                    context_full.append(f"[Source {i}: {source}]\n{content_full}\n")
+            
+            # Use FULL content for reformulation to LLM
+            context_text = "\n---\n".join(context_full)
+            
+            logger.info(f"Building reformulated query with {len(best_results)} context results:")
+            for snippet in context_snippets:
+                logger.info(f"  {snippet}")
+            
+            logger.info(f"Full context prepared ({len(context_text)} chars) for LLM reformulation")
+            
+            # Use LLM to reformulate the query
+            system_prompt = """Bạn là một chuyên gia phân tích truy vấn. 
+Nhiệm vụ của bạn là viết lại câu hỏi của người dùng kết hợp với thông tin đã truy xuất.
+
+HƯỚNG DẪN QUAN TRỌNG:
+1. Giữ nguyên ý định gốc của câu hỏi
+2. Kết hợp thông tin từ các kết quả đã truy xuất
+3. Làm cho truy vấn mới cụ thể hơn và có ngữ cảnh rõ ràng
+4. Giữ trong 1-2 câu, rõ ràng và hành động được
+
+ĐỊNH DẠNG ĐẦU RA:
+Chỉ trả về câu hỏi đã viết lại, không thêm giải thích.
+"""
+            
+            reformulation_prompt = ChatPromptTemplate.from_messages([
+                ("system", system_prompt),
+                ("human", f"""Câu hỏi gốc: {original_query}
+
+Thông tin đã truy xuất:
+{context_text}
+
+Viết lại câu hỏi để sử dụng tốt hơn thông tin này:""")
+            ])
+            
+            chain = reformulation_prompt | self.llm
+            response = await chain.ainvoke({})
+            
+            reformulated_query = response.content.strip()
+            state["reformulated_query"] = reformulated_query
+            state["reformulation_context"] = context_text
+            
+            logger.info(f"Reformulated Query: {reformulated_query}")
+            logger.info(f"Context Summary ({len(best_results)} results available):")
+            for snippet in context_snippets:
+                logger.info(f"  {snippet}")
+            
+            # Log full reformulated query (not just preview)
+            logger.info(f"\n{'FULL REFORMULATED QUERY':^60}")
+            logger.info(f"{reformulated_query}")
+            logger.info(f"{'END REFORMULATED QUERY':^60}\n")
+            
+            if self.observer and state.get("_step"):
+                await self.observer.emit_step_completed(
+                    state["_step"],
+                    output_size=len(reformulated_query),
+                    metadata={
+                        "context_results": len(best_results),
+                        "original_query_len": len(original_query),
+                        "reformulated_query_len": len(reformulated_query)
+                    }
+                )
+            
+            logger.info(f"{separator} QUERY REFORMULATION COMPLETE {separator}")
+            
+        except Exception as e:
+            logger.error(f"Query reformulation failed: {e}", exc_info=True)
+            state["reformulated_query"] = state.get("user_prompt", "")
+            state["reformulation_context"] = ""
+            if self.observer and state.get("_step"):
+                await self.observer.emit_step_failed(state["_step"], str(e))
+        
+        return state
+    
     async def node_analyze(self, state: WorkflowState) -> Dict[str, Any]:
         """Analyze detected data types"""
         try:
+            separator = "|" * 25
+            logger.info(f"{separator} DATA ANALYSIS START {separator}")
+            
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started("ANALYZE")
             
@@ -609,6 +960,7 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
                 )
             
             logger.info(f"Analyzed: table={state['has_table_data']}, numeric={state['has_numeric_data']}")
+            logger.info(f"{separator} DATA ANALYSIS COMPLETE {separator}")
         except Exception as e:
             logger.error(f"Analysis failed: {e}")
             state["text_only"] = True
@@ -632,10 +984,14 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
         - "RSI, quá mua" → calculate_rsi
         """
         try:
+            separator = "|" * 25
+            logger.info(f"{separator} TOOL SELECTION START {separator}")
+            
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started("SELECT_TOOLS")
             
             query = state.get("user_prompt", "").lower()
+            logger.info(f"Query for tool selection: {query[:100]}...")
             
             # Tool selection matrix (from original system prompt)
             tool_keywords = {
@@ -674,12 +1030,21 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
             }
             
             selected_tools = []
+            matched_keywords = {}
+            
+            logger.info("🔍 TOOL SELECTION REASONING:")
             for tool_name, config in tool_keywords.items():
-                if any(kw in query for kw in config["keywords"]):
+                matched = [kw for kw in config["keywords"] if kw in query]
+                if matched:
                     selected_tools.append(tool_name)
+                    matched_keywords[tool_name] = matched
+                    logger.info(f"  ✅ {tool_name}: matched keywords {matched}")
+                else:
+                    logger.info(f"  ❌ {tool_name}: no keyword matches")
             
             # If no tools matched by keywords, try to use classifier
             if not selected_tools:
+                logger.info("❌ No keyword matches found - using LLM classifier")
                 selection = await self.tool_selector.select_tools(
                     state.get("user_prompt", ""),
                     state.get("detected_data_types", []),
@@ -687,10 +1052,13 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
                     state.get("conversation_history", [])
                 )
                 selected_tools = selection.get("selected_tools", [])
+                logger.info(f"  Classifier selected: {selected_tools}")
+            else:
+                logger.info(f"✅ Keyword-based selection successful: {len(selected_tools)} tool(s)")
             
             state["selected_tools"] = selected_tools
             state["primary_tool"] = selected_tools[0] if selected_tools else None
-            state["tool_selection_rationale"] = f"Selected tools based on query keywords: {', '.join(selected_tools)}"
+            state["tool_selection_rationale"] = f"Selected {len(selected_tools)} tools: {', '.join(selected_tools) if selected_tools else 'none'}"
             
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_completed(
@@ -698,7 +1066,8 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
                     metadata={"tools_selected": len(selected_tools), "tools": selected_tools}
                 )
             
-            logger.info(f"Selected tools via decision matrix: {selected_tools}")
+            logger.info(f"Final decision: {len(selected_tools)} tool(s) selected")
+            logger.info(f"{separator} TOOL SELECTION COMPLETE {separator}")
         except Exception as e:
             logger.error(f"Tool selection failed: {e}")
             state["selected_tools"] = []
@@ -721,8 +1090,71 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started("GENERATE")
             
-            # System prompt from original (adapted for Vietnamese)
-            system_prompt = """Bạn là một chuyên gia tư vấn tài chính chuyên về thị trường chứng khoán Việt Nam.
+            # Mark first LLM use with proper logging
+            from ..llm import LLMFactory
+            LLMFactory.mark_first_use()
+            
+            query = state.get("user_prompt", "").strip()
+            has_files = bool(state.get("uploaded_files"))
+            reformulated_query = state.get("reformulated_query", "")
+            
+            # Check if this is just a file upload without actual content query
+            # (query ONLY contains filename, no actual analysis request)
+            is_file_only_query = False
+            if has_files and query:
+                # Get file names from uploaded files
+                file_names = [
+                    f.get("name", "") if isinstance(f, dict) else str(f)
+                    for f in state.get("uploaded_files", [])
+                ]
+                
+                # Remove filenames from query to see if there's actual content
+                query_without_filenames = query.lower()
+                for fname in file_names:
+                    query_without_filenames = query_without_filenames.replace(fname.lower(), "").replace(fname.split(".")[0].lower(), "")
+                
+                # Check if remaining query is just generic file keywords (no specific analysis)
+                query_without_filenames = query_without_filenames.replace(":", "").replace("-", "").strip()
+                generic_keywords = ["phân tích", "tóm tắt", "file", "tệp", "sau", "và"]
+                
+                # If query only contains generic keywords and filenames, it's file-only
+                if query_without_filenames:
+                    remaining_words = [w for w in query_without_filenames.split() if w and w not in generic_keywords]
+                    is_file_only_query = len(remaining_words) == 0  # Only generic keywords remain
+                else:
+                    is_file_only_query = True  # Empty after removing filenames
+            
+            # If no specific query was provided, ask user for clarification
+            if has_files and is_file_only_query:
+                uploaded_files = state.get("uploaded_files", [])
+                # Handle both string filenames and dict objects
+                file_list = ", ".join([
+                    f.get("name", "tệp") if isinstance(f, dict) else str(f)
+                    for f in uploaded_files
+                ])
+                
+                response_text = f"""Tôi đã nhận được tệp sau của bạn: **{file_list}**
+
+**Để tôi có thể giúp bạn phân tích tệp này, vui lòng:**
+
+1. **Gửi lại câu hỏi cụ thể** về tệp bạn vừa tải lên:
+   - Ví dụ: "Phân tích doanh thu trong báo cáo này"
+   - Ví dụ: "Tóm tắt các điểm chính từ tệp"
+   - Ví dụ: "Tìm thông tin về lợi nhuận"
+
+2. **Hoặc chỉ rõ bạn muốn tôi làm gì:**
+   - Phân tích dữ liệu tài chính cụ thể
+   - Tóm tắt nội dung chính
+   - So sánh các chỉ số
+   - Tìm kiếm thông tin cụ thể
+
+**Lưu ý:** Tôi sẽ xử lý tệp của bạn và tìm kiếm thông tin dựa trên câu hỏi cụ thể của bạn. Vui lòng cung cấp chi tiết về những gì bạn cần!"""
+                
+                state["generated_answer"] = response_text
+                logger.info(f"File uploaded without specific query - providing guidance (files: {len(uploaded_files)})")
+            else:
+                # System prompt from original (adapted for Vietnamese)
+                system_prompt = """Bạn là một chuyên gia tư vấn tài chính chuyên về thị trường chứng khoán Việt Nam.
 
 NHIỆM VỤ:
 - Trả lời các câu hỏi về thị trường chứng khoán Việt Nam một cách chính xác, chi tiết
@@ -754,36 +1186,35 @@ QUY TẮC TRẢ LỜI:
    - Nếu dữ liệu không tìm thấy, giải thích rõ lý do
    - Gợi ý cách sửa nếu có thể
    - Hướng dẫn người dùng kiểm tra lại thông tin đầu vào"""
-            
-            query = state.get("user_prompt", "")
-            context = ""
-            
-            if state.get("best_search_results"):
-                context = "\n\n".join([
-                    f"[{r.get('source', 'Source')}]: {r.get('content', '')[:300]}"
-                    for r in state["best_search_results"][:5]
+                
+                context = ""
+                
+                if state.get("best_search_results"):
+                    context = "\n\n".join([
+                        f"[{r.get('source', 'Source')}]: {r.get('content', '')[:300]}"
+                        for r in state["best_search_results"][:5]
+                    ])
+                
+                prompt = ChatPromptTemplate.from_messages([
+                    ("system", system_prompt),
+                    ("human", "Câu hỏi: {query}\n\nDữ liệu bổ sung:\n{context}\n\nHãy trả lời:")
                 ])
-            
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", system_prompt),
-                ("human", "Câu hỏi: {query}\n\nDữ liệu bổ sung:\n{context}\n\nHãy trả lời:")
-            ])
-            chain = prompt | self.llm
-            
-            response = await chain.ainvoke({
-                "query": query,
-                "context": context or "Không có dữ liệu bổ sung"
-            })
-            
-            state["generated_answer"] = response.content
+                chain = prompt | self.llm
+                
+                response = await chain.ainvoke({
+                    "query": query,
+                    "context": context or "Không có dữ liệu bổ sung"
+                })
+                
+                state["generated_answer"] = response.content
+                logger.info(f"Answer generated ({len(response.content)} chars)")
             
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_completed(
                     state["_step"],
-                    output_size=len(response.content)
+                    output_size=len(state.get("generated_answer", ""))
                 )
             
-            logger.info(f"Answer generated ({len(response.content)} chars)")
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             state["generated_answer"] = f"Xin lỗi, tôi gặp lỗi khi xử lý câu hỏi của bạn: {str(e)}"
@@ -795,6 +1226,9 @@ QUY TẮC TRẢ LỜI:
     async def node_execute_tools(self, state: WorkflowState) -> Dict[str, Any]:
         """Execute selected tools"""
         try:
+            separator = "|" * 25
+            logger.info(f"{separator} TOOL EXECUTION START {separator}")
+            
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started(
                     "EXECUTE_TOOLS",
@@ -802,6 +1236,7 @@ QUY TẮC TRẢ LỜI:
                 )
             
             selected = state.get("selected_tools", [])
+            logger.info(f"Tools to execute: {selected if selected else 'none selected'}")
             
             if not selected:
                 logger.info("No tools selected")
@@ -815,12 +1250,16 @@ QUY TẮC TRẢ LỜI:
             
             for tool_name in selected:
                 try:
+                    logger.info(f"  Executing tool: {tool_name}")
                     tool = next((t for t in self.tools if getattr(t, 'name', '') == tool_name), None)
                     if tool and hasattr(tool, 'func'):
                         result = await tool.func(state.get("user_prompt", ""))
                         tool_results[tool_name] = result
+                        logger.info(f"  ✅ {tool_name} completed")
+                    else:
+                        logger.warning(f"  ❌ Tool {tool_name} not found or has no func method")
                 except Exception as e:
-                    logger.warning(f"Tool {tool_name} failed: {e}")
+                    logger.warning(f"  ❌ Tool {tool_name} failed: {e}")
             
             state["tool_results"] = tool_results
             
@@ -830,7 +1269,8 @@ QUY TẮC TRẢ LỜI:
                     metadata={"tools_executed": len(tool_results)}
                 )
             
-            logger.info(f"Tool execution complete: {len(tool_results)} tools")
+            logger.info(f"Tool execution complete: {len(tool_results)}/{len(selected)} tools succeeded")
+            logger.info(f"{separator} TOOL EXECUTION COMPLETE {separator}")
         except Exception as e:
             logger.error(f"Tool execution failed: {e}")
             state["tool_results"] = {}
@@ -878,7 +1318,7 @@ QUY TẮC TRẢ LỜI:
     
     async def invoke(self, user_prompt: str, uploaded_files: list = None, 
                      conversation_history: list = None, user_id: str = "default",
-                     session_id: str = "default", rag_results: list = None,
+                     session_id: str = "default", use_rag: bool = True,
                      tools_enabled: bool = True) -> Dict[str, Any]:
         """
         Invoke the V4 workflow with given parameters.
@@ -889,7 +1329,7 @@ QUY TẮC TRẢ LỜI:
             conversation_history: List of previous messages
             user_id: User identifier
             session_id: Session identifier
-            rag_results: Retrieved RAG results
+            use_rag: Whether to enable RAG search (workflow will handle it)
             tools_enabled: Whether tools are enabled
             
         Returns:
@@ -897,6 +1337,12 @@ QUY TẮC TRẢ LỜI:
         """
         try:
             logger.info(f"V4 workflow invoked: user={user_id}, session={session_id}")
+            logger.info(f"[WORKFLOW] Input parameters:")
+            logger.info(f"[WORKFLOW]   - user_prompt: {user_prompt[:50] if user_prompt else 'None'}...")
+            logger.info(f"[WORKFLOW]   - uploaded_files type: {type(uploaded_files)}")
+            logger.info(f"[WORKFLOW]   - uploaded_files length: {len(uploaded_files) if uploaded_files else 0}")
+            if uploaded_files:
+                logger.info(f"[WORKFLOW]   - uploaded_files: {[f.get('name', 'unknown') if isinstance(f, dict) else str(f) for f in uploaded_files]}")
             
             # Create initial state with the expected parameters
             state = create_initial_state(
@@ -907,8 +1353,15 @@ QUY TẮC TRẢ LỜI:
                 session_id=session_id
             )
             
-            # Add RAG results and tools_enabled to the state
-            state["best_search_results"] = rag_results or []
+            logger.info(f"[WORKFLOW] State created:")
+            logger.info(f"[WORKFLOW]   - state['uploaded_files'] type: {type(state['uploaded_files'])}")
+            logger.info(f"[WORKFLOW]   - state['uploaded_files'] length: {len(state['uploaded_files'])}")
+            if state['uploaded_files']:
+                logger.info(f"[WORKFLOW]   - state['uploaded_files']: {state['uploaded_files']}")
+
+            
+            # Add RAG and tools flags to the state
+            state["rag_enabled"] = use_rag  # Workflow will decide in RETRIEVE node
             state["tools_enabled"] = tools_enabled
             
             # Invoke the compiled graph

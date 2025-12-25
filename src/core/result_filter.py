@@ -138,8 +138,19 @@ class ResultFilter:
                 # Calculate RRF component: weight * (1 / (rank + k))
                 rrf_component = weight * (1.0 / (rank + self.k))
                 
-                # Use document ID as key (fallback to content if no ID)
-                doc_id = result.get('doc_id') or result.get('id') or hash(result.get('content', ''))
+                # Use result ID as primary key for deduplication
+                # This preserves different chunks from same file (they have different IDs)
+                doc_id = result.get('id')
+                if not doc_id:
+                    # Fallback to point_id if available
+                    doc_id = result.get('point_id')
+                if not doc_id:
+                    # Last resort: create unique key from source + metadata to avoid collisions
+                    # This ensures each result is treated as unique
+                    source = result.get('source', '')
+                    title = result.get('title', '')
+                    text_hash = abs(hash(result.get('text', result.get('content', ''))[:100])) % 1000000
+                    doc_id = f"{source}_{title}_{text_hash}_{rank}".replace(' ', '_')
                 
                 # Update total score
                 scores_by_doc[doc_id]['rrf_score'] += rrf_component
@@ -169,6 +180,9 @@ class ResultFilter:
         """
         Deduplicate results by document ID, keeping highest-scoring instance.
         
+        Only deduplicates truly identical documents (same ID/point_id).
+        Different chunks from the same file are NOT deduplicated (they have different IDs).
+        
         Args:
             results: List of results with 'rrf_score' field
             
@@ -178,8 +192,12 @@ class ResultFilter:
         seen = {}
         
         for result in results:
-            # Use document ID as key
-            doc_id = result.get('doc_id') or result.get('id') or hash(result.get('content', ''))
+            # Use document/point ID as key - this is unique per chunk
+            doc_id = result.get('id') or result.get('point_id')
+            if not doc_id:
+                # If no ID, this is from a different source - don't deduplicate it
+                # Generate a stable key from the generated ID we created earlier
+                doc_id = f"{result.get('source', '')}_{result.get('title', '')}"
             
             # Keep highest scoring version
             if doc_id not in seen or result['rrf_score'] > seen[doc_id]['rrf_score']:
