@@ -5,6 +5,7 @@ from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 
 from src.services.qdrant_collection_manager import QdrantCollectionManager
+from src.services.advanced_chunking_service import AdvancedChunkingService
 from src.core.embeddings import get_embedding_strategy
 from src.core.summarization import get_summarization_strategy, should_summarize_response
 from src.core.config import settings
@@ -19,6 +20,12 @@ class MultiCollectionRAGService:
         self.qd_manager = QdrantCollectionManager()
         self.embedding_strategy = get_embedding_strategy()
         self.summarization_strategy = get_summarization_strategy()
+        # Initialize advanced chunking service for two-level chunking
+        self.advanced_chunking = AdvancedChunkingService(
+            chunk_size=settings.CHUNK_SIZE_TOKENS,
+            chunk_overlap=settings.CHUNK_OVERLAP_TOKENS
+        )
+        logger.info("[INGEST:INIT] ✓ Advanced chunking service initialized")
     
     def chunk_text(self, text: str, chunk_size: int = None, overlap: int = None) -> List[Dict]:
         """Split text into overlapping chunks"""
@@ -73,26 +80,21 @@ class MultiCollectionRAGService:
                     title: str = "",
                     source: str = "") -> Tuple[int, Optional[str]]:
         """
-        Add document to user's collection with optional summarization.
-        Includes embedding method selection logging.
+        Add document to user's collection with advanced two-level chunking.
+        Creates both structural and metric-centric chunks.
         
         Args:
             user_id: User ID
-            chat_session_id: Chat session ID (from PostgreSQL ChatSession.id) - not a generated one
+            chat_session_id: Chat session ID (from PostgreSQL ChatSession.id)
             text: Document text to add
             title: Document title
             source: Document source/filename
         
-        Returns: (chunks_added, summary)
+        Returns: (total_chunks_added, summary)
         """
         file_id = str(uuid.uuid4())
-        chunks = self.chunk_text(text)
         
-        if not chunks:
-            logger.warning(f"No chunks generated for document {title}")
-            return 0, None
-        
-        # Determine and log embedding method based on file size
+        # Determine embedding method based on file size
         text_size_kb = len(text.encode('utf-8')) / 1024
         if text_size_kb < 5:
             embedding_method = "SINGLE_DENSE"
@@ -101,51 +103,96 @@ class MultiCollectionRAGService:
         else:
             embedding_method = "HIERARCHICAL"
         
-        logger.info(f"[INGEST] Embedding method selection:")
-        logger.info(f"  File size: {text_size_kb:.1f}KB")
-        logger.info(f"  Method: {embedding_method} (threshold: <5KB=SINGLE_DENSE, <50KB=MULTIDIMENSIONAL, >=50KB=HIERARCHICAL)")
-        logger.info(f"  Model: general (sentence-transformers/all-MiniLM-L6-v2)")
-        logger.info(f"  Dimensions: 384")
-        logger.info(f"  Strategy: {embedding_method.lower()} embedding")
+        logger.info(f"[INGEST] Processing document with advanced chunking:")
+        logger.info(f"  File ID: {file_id}")
+        logger.info(f"  Title: {title}")
+        logger.info(f"  Size: {text_size_kb:.1f}KB")
+        logger.info(f"  Embedding method: {embedding_method}")
         
-        # Only include non-empty title/source in metadata to avoid cluttering vectordb
-        chunks_with_metadata = []
-        for chunk in chunks:
-            chunk_meta = {**chunk, 'doc_id': file_id}
-            if title and title.strip():
-                chunk_meta['filename'] = title  # Use 'filename' instead of 'title'
-            if source and source.strip():
-                chunk_meta['source_file'] = source  # Use 'source_file' for clarity
-            chunks_with_metadata.append(chunk_meta)
+        # Step 1: Run advanced chunking pipeline
+        try:
+            struct_payloads, metric_payloads = self.advanced_chunking.process_document(
+                text=text,
+                file_id=file_id,
+                user_id=user_id,
+                chat_session_id=chat_session_id
+            )
+            logger.info(f"[INGEST:CHUNKING] ✓ Advanced chunking complete: "
+                       f"{len(struct_payloads)} structural, {len(metric_payloads)} metric chunks")
+        except Exception as e:
+            logger.error(f"[INGEST:CHUNKING] ✗ Advanced chunking failed: {e}")
+            # Fallback to legacy chunking
+            logger.info(f"[INGEST] Falling back to legacy chunking")
+            chunks = self.chunk_text(text)
+            if not chunks:
+                logger.warning(f"No chunks generated for document {title}")
+                return 0, None
+            
+            struct_payloads = []
+            for chunk in chunks:
+                chunk_meta = {**chunk, 'doc_id': file_id}
+                if title and title.strip():
+                    chunk_meta['filename'] = title
+                if source and source.strip():
+                    chunk_meta['source_file'] = source
+                struct_payloads.append(chunk_meta)
+            
+            metric_payloads = []  # No metric chunks in fallback
         
-        logger.info(f"[INGEST] Chunking: {len(chunks_with_metadata)} chunks created from {title}")
+        # Step 2: Store structural chunks
+        num_struct = 0
+        try:
+            num_struct = self.qd_manager.add_document_chunks(
+                user_id=user_id,
+                chat_session_id=chat_session_id,
+                file_id=file_id,
+                chunks=struct_payloads
+            )
+            logger.info(f"[INGEST:STORAGE] ✓ Stored {num_struct} structural chunks")
+        except Exception as e:
+            logger.error(f"[INGEST:STORAGE] ✗ Failed to store structural chunks: {e}")
+            raise
         
-        num_chunks = self.qd_manager.add_document_chunks(
-            user_id=user_id,
-            chat_session_id=chat_session_id,
-            file_id=file_id,
-            chunks=chunks_with_metadata
-        )
+        # Step 3: Store metric-centric chunks
+        num_metric = 0
+        if metric_payloads:
+            try:
+                num_metric = self.qd_manager.add_document_chunks(
+                    user_id=user_id,
+                    chat_session_id=chat_session_id,
+                    file_id=file_id,
+                    chunks=metric_payloads
+                )
+                logger.info(f"[INGEST:STORAGE] ✓ Stored {num_metric} metric-centric chunks")
+            except Exception as e:
+                logger.warning(f"[INGEST:STORAGE] ⚠ Failed to store metric chunks (continuing): {e}")
         
-        logger.info(f"[INGEST] ✓ Ingested {num_chunks} vectors to Qdrant collection")
-        logger.info(f"[INGEST] File ID: {file_id}, Title: {title}, Source: {source}")
+        total_chunks = num_struct + num_metric
+        logger.info(f"[INGEST:STORAGE] ✓ Total chunks stored: {total_chunks} ({num_struct} structural + {num_metric} metric)")
         
+        # Step 4: Generate summary if configured
         summary = None
         if should_summarize_response(text, settings.SUMMARIZE_MODE):
+            logger.info(f"[INGEST:SUMMARY] Starting summarization for {title} ({len(text)} chars)")
             try:
                 summary = self.summarization_strategy.summarize(text, {"source": source})
-                logger.info(f"[INGEST] Generated summary for {title}")
+                logger.info(f"[INGEST:SUMMARY] ✓ Summarization completed")
+                if summary:
+                    logger.debug(f"[INGEST:SUMMARY] Preview: {summary[:100]}...")
             except Exception as e:
-                logger.warning(f"[INGEST] Failed to generate summary: {e}")
+                logger.warning(f"[INGEST:SUMMARY] ✗ Failed to generate summary: {e}")
+        else:
+            logger.debug(f"[INGEST:SUMMARY] Skipped: mode={settings.SUMMARIZE_MODE}")
         
-        return num_chunks, summary
+        logger.info(f"[INGEST] ✓ Document ingestion complete: {file_id}")
+        return total_chunks, summary
     
     def add_document_to_global(self,
                               text: str,
                               title: str = "",
                               source: str = "") -> Tuple[int, Optional[str]]:
         """
-        Add document to GLOBAL shared collection (admin only).
+        Add document to GLOBAL shared collection (admin only) with advanced chunking.
         Used for shared knowledge base documents accessible by all users.
         
         Args:
@@ -153,16 +200,11 @@ class MultiCollectionRAGService:
             title: Document title
             source: Document source/filename
         
-        Returns: (chunks_added, summary)
+        Returns: (total_chunks_added, summary)
         """
         file_id = str(uuid.uuid4())
-        chunks = self.chunk_text(text)
         
-        if not chunks:
-            logger.warning(f"No chunks generated for global document {title}")
-            return 0, None
-        
-        # Determine and log embedding method based on file size
+        # Determine embedding method based on file size
         text_size_kb = len(text.encode('utf-8')) / 1024
         if text_size_kb < 5:
             embedding_method = "SINGLE_DENSE"
@@ -171,42 +213,86 @@ class MultiCollectionRAGService:
         else:
             embedding_method = "HIERARCHICAL"
         
-        logger.info(f"[INGEST-GLOBAL] Embedding method selection:")
-        logger.info(f"  File size: {text_size_kb:.1f}KB")
-        logger.info(f"  Method: {embedding_method} (threshold: <5KB=SINGLE_DENSE, <50KB=MULTIDIMENSIONAL, >=50KB=HIERARCHICAL)")
-        logger.info(f"  Model: general (sentence-transformers/all-MiniLM-L6-v2)")
-        logger.info(f"  Dimensions: 384")
-        logger.info(f"  Strategy: {embedding_method.lower()} embedding")
+        logger.info(f"[INGEST-GLOBAL] Processing document with advanced chunking:")
+        logger.info(f"  File ID: {file_id}")
+        logger.info(f"  Title: {title}")
+        logger.info(f"  Size: {text_size_kb:.1f}KB")
+        logger.info(f"  Embedding method: {embedding_method}")
         
-        # Only include non-empty title/source in metadata to avoid cluttering vectordb
-        chunks_with_metadata = []
-        for chunk in chunks:
-            chunk_meta = {**chunk, 'doc_id': file_id}
-            if title and title.strip():
-                chunk_meta['filename'] = title  # Use 'filename' instead of 'title'
-            if source and source.strip():
-                chunk_meta['source_file'] = source  # Use 'source_file' for clarity
-            chunks_with_metadata.append(chunk_meta)
+        # Step 1: Run advanced chunking pipeline
+        # For global: user_id = "admin", chat_session_id = "global"
+        try:
+            struct_payloads, metric_payloads = self.advanced_chunking.process_document(
+                text=text,
+                file_id=file_id,
+                user_id="admin",
+                chat_session_id="global"
+            )
+            logger.info(f"[INGEST-GLOBAL:CHUNKING] ✓ Advanced chunking complete: "
+                       f"{len(struct_payloads)} structural, {len(metric_payloads)} metric chunks")
+        except Exception as e:
+            logger.error(f"[INGEST-GLOBAL:CHUNKING] ✗ Advanced chunking failed: {e}")
+            # Fallback to legacy chunking
+            logger.info(f"[INGEST-GLOBAL] Falling back to legacy chunking")
+            chunks = self.chunk_text(text)
+            if not chunks:
+                logger.warning(f"No chunks generated for global document {title}")
+                return 0, None
+            
+            struct_payloads = []
+            for chunk in chunks:
+                chunk_meta = {**chunk, 'doc_id': file_id}
+                if title and title.strip():
+                    chunk_meta['filename'] = title
+                if source and source.strip():
+                    chunk_meta['source_file'] = source
+                struct_payloads.append(chunk_meta)
+            
+            metric_payloads = []
         
-        logger.info(f"[INGEST-GLOBAL] Chunking: {len(chunks_with_metadata)} chunks created from {title}")
+        # Step 2: Store structural chunks
+        num_struct = 0
+        try:
+            num_struct = self.qd_manager.add_document_chunks_to_global(
+                file_id=file_id,
+                chunks=struct_payloads
+            )
+            logger.info(f"[INGEST-GLOBAL:STORAGE] ✓ Stored {num_struct} structural chunks")
+        except Exception as e:
+            logger.error(f"[INGEST-GLOBAL:STORAGE] ✗ Failed to store structural chunks: {e}")
+            raise
         
-        num_chunks = self.qd_manager.add_document_chunks_to_global(
-            file_id=file_id,
-            chunks=chunks_with_metadata
-        )
+        # Step 3: Store metric-centric chunks
+        num_metric = 0
+        if metric_payloads:
+            try:
+                num_metric = self.qd_manager.add_document_chunks_to_global(
+                    file_id=file_id,
+                    chunks=metric_payloads
+                )
+                logger.info(f"[INGEST-GLOBAL:STORAGE] ✓ Stored {num_metric} metric-centric chunks")
+            except Exception as e:
+                logger.warning(f"[INGEST-GLOBAL:STORAGE] ⚠ Failed to store metric chunks (continuing): {e}")
         
-        logger.info(f"[INGEST-GLOBAL] ✓ Ingested {num_chunks} vectors to global collection")
-        logger.info(f"[INGEST-GLOBAL] File ID: {file_id}, Title: {title}, Source: {source}")
+        total_chunks = num_struct + num_metric
+        logger.info(f"[INGEST-GLOBAL:STORAGE] ✓ Total chunks stored: {total_chunks} ({num_struct} structural + {num_metric} metric)")
         
+        # Step 4: Generate summary if configured
         summary = None
         if should_summarize_response(text, settings.SUMMARIZE_MODE):
+            logger.info(f"[INGEST-GLOBAL:SUMMARY] Starting summarization for {title} ({len(text)} chars)")
             try:
                 summary = self.summarization_strategy.summarize(text, {"source": source})
-                logger.info(f"[INGEST-GLOBAL] Generated summary for {title}")
+                logger.info(f"[INGEST-GLOBAL:SUMMARY] ✓ Summarization completed")
+                if summary:
+                    logger.debug(f"[INGEST-GLOBAL:SUMMARY] Preview: {summary[:100]}...")
             except Exception as e:
-                logger.warning(f"[INGEST-GLOBAL] Failed to generate summary: {e}")
+                logger.warning(f"[INGEST-GLOBAL:SUMMARY] ✗ Failed to generate summary: {e}")
+        else:
+            logger.debug(f"[INGEST-GLOBAL:SUMMARY] Skipped: mode={settings.SUMMARIZE_MODE}")
         
-        return num_chunks, summary
+        logger.info(f"[INGEST-GLOBAL] ✓ Document ingestion complete: {file_id}")
+        return total_chunks, summary
     
     def _extract_filename_from_query(self, query: str) -> Optional[str]:
         """Extract filename mentioned in the query
@@ -349,11 +435,12 @@ class MultiCollectionRAGService:
         for i, r in enumerate(keyword_results[:3]):
             logger.info(f"    [{i+1}] {r.get('source', 'unknown')}")
         
-        # Phase 3: RRF ranking and filtering
+        # Phase 3: RRF ranking and filtering (with deduplication disabled)
         threshold = 0.30
         final_results = self._apply_rrf_ranking_with_threshold(
             semantic_results, keyword_results, 
-            threshold=threshold
+            threshold=threshold,
+            deduplicate=False  # Disable deduplication to return all matching chunks
         )
         
         logger.info(f"[RETRIEVE] Phase 3 - RRF Ranking: {len(final_results)} results (threshold: {threshold})")
@@ -418,7 +505,7 @@ class MultiCollectionRAGService:
                 query_embedding=query_embedding,
                 query_text=query,
                 chat_session_id=session_id,
-                limit=10,
+                limit=20,
                 include_global=False
             )
             
@@ -464,7 +551,7 @@ class MultiCollectionRAGService:
                 query=query,
                 user_id=user_id,
                 chat_session_id=session_id,
-                limit=10
+                limit=20
             )
             
             # Also extract and search for filenames in the query
@@ -511,14 +598,67 @@ class MultiCollectionRAGService:
         semantic: List[dict], 
         keyword: List[dict],
         threshold: float = 0.30,
-        k: int = 60
+        k: int = 60,
+        deduplicate: bool = False
     ) -> List[dict]:
         """
         RRF ranking with relevance threshold filtering.
         CRITICAL: Use 0.50 for uploaded files, 0.30 for global searches.
-        """
-        logger.info(f"  Phase 3 (RRF): semantic={len(semantic)}, keyword={len(keyword)}, threshold={threshold}")
         
+        Args:
+            semantic: Semantic search results
+            keyword: Keyword search results
+            threshold: Score threshold for filtering
+            k: RRF parameter (rank denominator)
+            deduplicate: If True, only return one instance per doc_id. If False, return all duplicates.
+        """
+        logger.info(f"  Phase 3 (RRF): semantic={len(semantic)}, keyword={len(keyword)}, threshold={threshold}, deduplicate={deduplicate}")
+        
+        if not deduplicate:
+            # No deduplication: combine all results and sort by score
+            all_results = []
+            
+            # Semantic results (priority 1.2x)
+            for i, result in enumerate(semantic):
+                if not result:
+                    logger.warning(f"  Skipping None semantic result at index {i}")
+                    continue
+                score = (1.2 / (k + i + 1))
+                result_with_score = {
+                    "id": result.get("id", f"semantic_{i}"),
+                    "score": score,
+                    "doc": result,
+                    "source": "semantic"
+                }
+                all_results.append(result_with_score)
+                logger.debug(f"    Semantic[{i}]: score = {score:.3f}")
+            
+            # Keyword results (priority 1.0x)
+            for i, result in enumerate(keyword):
+                if not result:
+                    logger.warning(f"  Skipping None keyword result at index {i}")
+                    continue
+                score = (1.0 / (k + i + 1))
+                result_with_score = {
+                    "id": result.get("id", f"keyword_{i}"),
+                    "score": score,
+                    "doc": result,
+                    "source": "keyword"
+                }
+                all_results.append(result_with_score)
+                logger.debug(f"    Keyword[{i}]: score = {score:.3f}")
+            
+            # Filter by threshold and sort
+            filtered = [r for r in all_results if r["score"] >= threshold]
+            ranked = sorted(filtered, key=lambda x: x["score"], reverse=True)
+            
+            logger.info(f"  Phase 3 (RRF) - NO DEDUP: {len(ranked)} results above threshold {threshold}")
+            for r in ranked[:5]:
+                logger.info(f"    id={str(r['id'])[:8]}... score={r['score']:.3f} source={r.get('source', '?')}")
+            
+            return ranked[:10]  # Return top 10
+        
+        # Original deduplication logic: combine scores for same doc_id
         scores = {}
         doc_map = {}
         
@@ -558,7 +698,7 @@ class MultiCollectionRAGService:
         ]
         ranked = sorted(ranked, key=lambda x: x["score"], reverse=True)
         
-        logger.info(f"  Phase 3 (RRF) filtered: {len(ranked)} results above threshold {threshold}")
+        logger.info(f"  Phase 3 (RRF) - WITH DEDUP: {len(ranked)} results above threshold {threshold}")
         for r in ranked[:5]:
             logger.info(f"    {str(r['id'])[:8]}... = {r['score']:.3f}")
         
@@ -593,33 +733,171 @@ class MultiCollectionRAGService:
                                     filename: str,
                                     chat_session_id: Optional[str] = None,
                                     limit: Optional[int] = None) -> List[Dict]:
-        """Dedicated metadata-only filename search
+        """Dedicated metadata-only filename search with fallback logic
         
-        Searches ONLY by filename. Returns results WITHOUT going through semantic/keyword/RRF phases.
-        If this finds results, other search phases are SKIPPED.
+        Search strategy (in order):
+        1. Try searching by file_id first (if filename pattern suggests it)
+        2. Fall back to searching by source_file (exact filename)
+        3. Try searching by base filename without hash suffix (e.g., "file_hash.pdf" → "file.pdf")
+        4. If no results, attempt hybrid search with semantic + keyword
         
-        Searches using: user_id + chat_session_id + filename (personal collection)
+        Returns ALL matching chunks without RRF deduplication.
+        
+        NOTE: Filenames may have hash suffixes added during upload (e.g., 
+        "annual-report.pdf" → "annual-report_abc123def.pdf"). This function
+        handles both exact and base filename matching.
         """
-        limit = limit or settings.RAG_TOP_K_RESULTS
+        limit = limit or 1000  # High limit to get all chunks for this file
         logger.info(f"[FILENAME-METADATA SEARCH] Filename: {filename}, user={user_id}, session={chat_session_id}")
         
         try:
-            # Search by filename using Qdrant search
-            results = self.qd_manager.search(
-                user_id=user_id,
-                query_embedding=None,
-                query_text=filename,
+            collection_name = self.qd_manager._get_user_collection_name(user_id)
+            results = []
+            
+            # Step 1: Try searching by file_id if filename looks like a UUID or hash
+            # File IDs are typically UUIDs or hashes from the ingestion process
+            if len(filename) > 30 or filename.count('-') >= 4:  # UUID-like pattern
+                logger.info(f"[FILENAME-METADATA SEARCH] Step 1: Attempting file_id search (UUID pattern detected)")
+                try:
+                    metadata_filters = {'file_id': filename}
+                    results = self.qd_manager.search_by_metadata(
+                        collection_name=collection_name,
+                        metadata_filters=metadata_filters,
+                        chat_session_id=chat_session_id,
+                        limit=limit
+                    )
+                    if results:
+                        logger.info(f"[FILENAME-METADATA SEARCH] ✓ File ID search found {len(results)} results")
+                        return results
+                    else:
+                        logger.info(f"[FILENAME-METADATA SEARCH] File ID search returned 0 results")
+                except Exception as e:
+                    logger.debug(f"[FILENAME-METADATA SEARCH] File ID search failed: {e}")
+            
+            # Step 2: Fall back to searching by source_file (exact filename)
+            logger.info(f"[FILENAME-METADATA SEARCH] Step 2: Attempting source_file search (exact filename)")
+            metadata_filters = {'source_file': filename}
+            results = self.qd_manager.search_by_metadata(
+                collection_name=collection_name,
+                metadata_filters=metadata_filters,
                 chat_session_id=chat_session_id,
-                limit=limit,
-                include_global=False
+                limit=limit
             )
             
-            logger.info(f"[FILENAME-METADATA SEARCH] ✓ Found {len(results)} results")
             if results:
-                logger.info(f"[FILENAME-METADATA SEARCH] ✓ Results found - SKIPPING semantic/keyword/RRF phases")
+                logger.info(f"[FILENAME-METADATA SEARCH] ✓ Source file search found {len(results)} results")
                 for i, r in enumerate(results[:3]):
-                    logger.info(f"    [{i+1}] {r.get('source', 'unknown')}")
-            return results
+                    logger.info(f"    [{i+1}] {r.get('source', 'unknown')} (score: {r.get('score', 'N/A')})")
+                if len(results) > 3:
+                    logger.info(f"    ... and {len(results) - 3} more chunks")
+                return results
+            
+            # Step 2b: Try searching by 'filename' metadata field (in case source is empty)
+            logger.info(f"[FILENAME-METADATA SEARCH] Step 2b: Attempting filename field search")
+            metadata_filters = {'filename': filename}
+            results = self.qd_manager.search_by_metadata(
+                collection_name=collection_name,
+                metadata_filters=metadata_filters,
+                chat_session_id=chat_session_id,
+                limit=limit
+            )
+            
+            if results:
+                logger.info(f"[FILENAME-METADATA SEARCH] ✓ Filename field search found {len(results)} results")
+                for i, r in enumerate(results[:3]):
+                    logger.info(f"    [{i+1}] {r.get('filename', r.get('source', 'unknown'))} (score: {r.get('score', 'N/A')})")
+                if len(results) > 3:
+                    logger.info(f"    ... and {len(results) - 3} more chunks")
+                return results
+            
+            # Step 3: Try base filename without hash suffix
+            # Example: "annual-report_abc123def.pdf" → "annual-report.pdf"
+            # or: "20251030_VNM_Ban_tin_NDT_Q3_2025_ver_29_10_e9074db22b.pdf" → "20251030_VNM_Ban_tin_NDT_Q3_2025_ver_29_10.pdf"
+            logger.info(f"[FILENAME-METADATA SEARCH] Step 3: Attempting base filename search (without hash suffix)")
+            
+            # Try removing common hash patterns
+            import re
+            base_filename = filename
+            
+            # Pattern 1: Remove _HASH before extension (e.g., filename_abc123.pdf → filename.pdf)
+            match = re.search(r'^(.+?)_[a-f0-9]{8,}(\.\w+)$', filename)
+            if match:
+                base_filename = match.group(1) + match.group(2)
+                logger.info(f"[FILENAME-METADATA SEARCH] Extracted base filename: {base_filename}")
+                
+                try:
+                    metadata_filters = {'source_file': base_filename}
+                    results = self.qd_manager.search_by_metadata(
+                        collection_name=collection_name,
+                        metadata_filters=metadata_filters,
+                        chat_session_id=chat_session_id,
+                        limit=limit
+                    )
+                    if results:
+                        logger.info(f"[FILENAME-METADATA SEARCH] ✓ Base filename search found {len(results)} results")
+                        for i, r in enumerate(results[:3]):
+                            logger.info(f"    [{i+1}] {r.get('source', 'unknown')} (score: {r.get('score', 'N/A')})")
+                        if len(results) > 3:
+                            logger.info(f"    ... and {len(results) - 3} more chunks")
+                        return results
+                except Exception as e:
+                    logger.debug(f"[FILENAME-METADATA SEARCH] Base filename search failed: {e}")
+            
+            # Step 4: Fallback - Try keyword search on the filename
+            # This works even if metadata fields don't match exactly
+            logger.info(f"[FILENAME-METADATA SEARCH] Step 4: Attempting keyword search on filename")
+            try:
+                # Extract just the base filename without extension
+                from pathlib import Path
+                filename_stem = Path(filename).stem
+                logger.info(f"[FILENAME-METADATA SEARCH] Keyword searching for stem: {filename_stem}")
+                
+                results = self.qd_manager.search_by_keyword(
+                    query=filename_stem,
+                    user_id=user_id,
+                    chat_session_id=chat_session_id,
+                    limit=limit
+                )
+                
+                if results:
+                    # Filter results to only those that likely match this file
+                    # by checking if the filename appears in the source or metadata
+                    filtered_results = []
+                    for r in results:
+                        source = r.get('source', '').lower()
+                        metadata = r.get('metadata', {})
+                        source_file = metadata.get('source_file', '').lower()
+                        filename_lower = filename.lower()
+                        base_filename_lower = base_filename.lower()
+                        
+                        # Match if any of these conditions hold:
+                        # 1. source contains the full filename
+                        # 2. source_file contains the full filename
+                        # 3. source contains the base filename (without hash)
+                        # 4. source_file contains the base filename
+                        if (filename_lower in source or 
+                            filename_lower in source_file or
+                            base_filename_lower in source or
+                            base_filename_lower in source_file):
+                            filtered_results.append(r)
+                    
+                    if filtered_results:
+                        logger.info(f"[FILENAME-METADATA SEARCH] ✓ Keyword search found {len(filtered_results)} matching results")
+                        for i, r in enumerate(filtered_results[:3]):
+                            logger.info(f"    [{i+1}] {r.get('source', 'unknown')} (score: {r.get('score', 'N/A')})")
+                        if len(filtered_results) > 3:
+                            logger.info(f"    ... and {len(filtered_results) - 3} more chunks")
+                        return filtered_results[:limit] if limit else filtered_results
+                    else:
+                        logger.info(f"[FILENAME-METADATA SEARCH] Keyword search returned {len(results)} results but none matched filename pattern")
+            except Exception as e:
+                logger.debug(f"[FILENAME-METADATA SEARCH] Step 4 keyword search failed: {e}")
+            
+            # Step 5: No results found via any method - return empty
+            logger.info(f"[FILENAME-METADATA SEARCH] No results found for filename: {filename}")
+            logger.info(f"[FILENAME-METADATA SEARCH] DEBUGGING INFO: File may be stored with different metadata.")
+            logger.info(f"[FILENAME-METADATA SEARCH] Tried searches for: {filename}, {base_filename}, keyword: {filename_stem}")
+            return []
             
         except Exception as e:
             logger.error(f"[FILENAME-METADATA SEARCH] Failed: {e}")

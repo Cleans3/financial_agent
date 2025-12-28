@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     QDRANT_URL: str = os.getenv("QDRANT_URL", "")
     QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
     
+    # Qdrant Timeout Configuration
+    QDRANT_TIMEOUT_SECONDS: int = int(os.getenv("QDRANT_TIMEOUT_SECONDS", "120"))  # 2 minutes
+    QDRANT_RETRY_ATTEMPTS: int = int(os.getenv("QDRANT_RETRY_ATTEMPTS", "3"))  # Number of retries
+    QDRANT_RETRY_DELAY_SECONDS: float = float(os.getenv("QDRANT_RETRY_DELAY_SECONDS", "2"))  # Initial delay
+    
     # Embedding Configuration (Dual Models)
     EMBEDDING_MODEL_FINANCIAL: str = os.getenv("EMBEDDING_MODEL_FINANCIAL", "fin-e5-small")
     EMBEDDING_MODEL_GENERAL: str = os.getenv("EMBEDDING_MODEL_GENERAL", "sentence-transformers/all-MiniLM-L6-v2")
@@ -48,8 +53,8 @@ class Settings(BaseSettings):
     
     # RAG Configuration
     RAG_PRIORITY_MODE: str = os.getenv("RAG_PRIORITY_MODE", "personal-first")
-    RAG_SIMILARITY_THRESHOLD: float = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.25"))
-    RAG_TOP_K_RESULTS: int = int(os.getenv("RAG_TOP_K_RESULTS", "5"))
+    RAG_SIMILARITY_THRESHOLD: float = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.1"))
+    RAG_TOP_K_RESULTS: int = int(os.getenv("RAG_TOP_K_RESULTS", "20"))
     
     # Summarization Configuration
     SUMMARIZE_MODE: str = os.getenv("SUMMARIZE_MODE", "on-demand")

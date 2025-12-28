@@ -61,13 +61,14 @@ class ToolSelector:
         }
         
         # Map intents to tool names
+        # Updated to match actual financial tools: calculate_rsi, calculate_sma, get_historical_data, etc.
         self.intent_to_tools = {
-            "calculate": ["calculator", "financial_calculator"],
-            "compare": ["data_comparator", "calculator"],
-            "trend": ["trend_analyzer", "time_series_analyzer"],
-            "analyze": ["data_analyzer", "pattern_detector"],
-            "search": ["data_retriever", "search_engine"],
-            "forecast": ["forecaster", "predictor"]
+            "calculate": ["calculate_rsi", "calculate_sma", "get_historical_data"],
+            "compare": ["get_company_info", "get_historical_data"],
+            "trend": ["calculate_sma", "get_historical_data"],
+            "analyze": ["get_company_info", "get_historical_data"],
+            "search": ["get_company_info", "get_shareholders", "get_officers", "get_subsidiaries", "get_company_events"],
+            "forecast": ["calculate_sma", "calculate_rsi"]
         }
     
     async def select_tools(

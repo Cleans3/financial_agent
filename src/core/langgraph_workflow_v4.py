@@ -3,6 +3,7 @@ LangGraphWorkflow V4 - Complete 13-node architecture
 Full workflow with parallel entry points, all routing, output formatting, and monitoring
 """
 
+import asyncio
 import logging
 from typing import Dict, Any, List, Optional
 from langgraph.graph import StateGraph, END
@@ -17,6 +18,8 @@ from .query_rewriter import QueryRewriter
 from .tool_selector import ToolSelector
 from .output_formatter import OutputFormatter
 from .workflow_observer import WorkflowObserver
+from ..services.advanced_retrieval_service import AdvancedRetrievalService
+from ..services.summary_tool_router import SummaryToolRouter
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +64,19 @@ class LangGraphWorkflowV4:
         self.tool_selector = ToolSelector()
         self.formatter = OutputFormatter()
         
+        # Initialize advanced retrieval and summary services
+        from ..services.multi_collection_rag_service import get_rag_service
+        rag_service = get_rag_service()
+        self.advanced_retrieval = AdvancedRetrievalService(qdrant_manager=rag_service.qd_manager)
+        self.summary_tool_router = SummaryToolRouter()
+        logger.info("[WORKFLOW:INIT] ✓ Advanced retrieval service ready")
+        logger.info("[WORKFLOW:INIT] ✓ Summary tool router ready")
+        
         # Optional workflow observer
         self.observer = WorkflowObserver() if enable_observer else None
         
         self.graph = self._build_graph()
-        logger.info("LangGraphWorkflowV4 initialized with complete 13-node architecture")
+        logger.info("LangGraphWorkflowV4 initialized with complete 13-node architecture + advanced retrieval/summarization")
     
     def _build_graph(self) -> StateGraph:
         """Build the complete 13-node workflow graph"""
@@ -83,6 +94,7 @@ class LangGraphWorkflowV4:
         workflow.add_node("rewrite_convo", self.node_rewrite_conversation_context)
         workflow.add_node("retrieve", self.node_retrieve)
         workflow.add_node("filter", self.node_filter)
+        workflow.add_node("summary_tools", self.node_summary_tools)
         workflow.add_node("query_reformulation", self.node_query_reformulation)
         workflow.add_node("analyze", self.node_analyze)
         workflow.add_node("select_tools", self.node_select_tools)
@@ -143,33 +155,28 @@ class LangGraphWorkflowV4:
         
         # Main retrieval pipeline
         workflow.add_edge("retrieve", "filter")
-        workflow.add_edge("filter", "query_reformulation")
-        workflow.add_edge("query_reformulation", "analyze")
+        workflow.add_edge("filter", "analyze")
+        
+        # ANALYZE → SELECT_TOOLS (analyze data types to decide which tools to use)
         workflow.add_edge("analyze", "select_tools")
-        workflow.add_edge("select_tools", "generate")
         
-        # GENERATE routes to EXECUTE_TOOLS or FORMAT_OUTPUT
-        workflow.add_conditional_edges(
-            "generate",
-            lambda s: "execute_tools" if s.get("selected_tools") else "format_output",
-            {
-                "execute_tools": "execute_tools",
-                "format_output": "format_output"
-            }
-        )
+        # SELECT_TOOLS → EXECUTE_TOOLS (execute selected tools immediately)
+        workflow.add_edge("select_tools", "execute_tools")
         
-        # EXECUTE_TOOLS back to GENERATE for synthesis
-        workflow.add_conditional_edges(
-            "execute_tools",
-            lambda s: "generate" if s.get("needs_retry") else "format_output",
-            {
-                "generate": "generate",
-                "format_output": "format_output"
-            }
-        )
+        # EXECUTE_TOOLS → SUMMARY_TOOLS (summarize both DB results + tool results)
+        workflow.add_edge("execute_tools", "summary_tools")
         
-        # FORMAT_OUTPUT goes to END
-        workflow.add_edge("format_output", END)
+        # SUMMARY_TOOLS → QUERY_REFORMULATION (reformulation gets summary + tool results)
+        workflow.add_edge("summary_tools", "query_reformulation")
+        
+        # QUERY_REFORMULATION → FORMAT_OUTPUT (format combined data for readability)
+        workflow.add_edge("query_reformulation", "format_output")
+        
+        # FORMAT_OUTPUT → GENERATE (LLM generates final answer with formatted data)
+        workflow.add_edge("format_output", "generate")
+        
+        # GENERATE goes to END
+        workflow.add_edge("generate", END)
         
         return workflow.compile()
     
@@ -287,7 +294,24 @@ class LangGraphWorkflowV4:
                     }
                 )
             
-            logger.info(f"Classified: {state.get('prompt_type', 'unknown')} (confidence: {confidence})")
+            logger.info(f"")
+            logger.info(f"🔍 CLASSIFICATION RESULT:")
+            logger.info(f"─" * 80)
+            logger.info(f"Prompt: {prompt[:60]}..." if len(prompt) > 60 else f"Prompt: {prompt}")
+            logger.info(f"Type: {state.get('prompt_type', 'unknown')}")
+            logger.info(f"Is Chitchat: {state.get('is_chitchat', False)}")
+            logger.info(f"Confidence: {confidence}")
+            logger.info(f"")
+            
+            # CRITICAL: Show which branch will be taken
+            if state.get("is_chitchat"):
+                logger.info(f"⚠️  ROUTING: This query will go → direct_response → format_output → generate")
+                logger.info(f"   (Reformulation will NOT happen!)")
+            else:
+                logger.info(f"✅ ROUTING: This query will go through normal pipeline")
+                logger.info(f"   (Will include: rewrite → retrieve → filter → analyze → select_tools → execute_tools → query_reformulation → format_output → generate)")
+            logger.info(f"─" * 80)
+            logger.info(f"")
         except Exception as e:
             logger.error(f"Classification failed: {e}")
             state["prompt_type"] = PromptType.INSTRUCTION
@@ -330,6 +354,19 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
             response = await chain.ainvoke({"query": state["user_prompt"]})
             state["generated_answer"] = response.content
             
+            # IMPORTANT: Set reformulated_query for consistency across all paths
+            # For chitchat, reformulated_query = original query (no RAG/tools needed)
+            state["reformulated_query"] = state["user_prompt"]
+            
+            logger.info("")
+            logger.info("🎯 DIRECT RESPONSE (Chitchat Path):")
+            logger.info("─" * 80)
+            logger.info(f"  - Query: {state['user_prompt'][:60]}...")
+            logger.info(f"  - Response generated: {len(response.content)} chars")
+            logger.info(f"  - reformulated_query set to: original query")
+            logger.info("─" * 80)
+            logger.info("")
+            
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_completed(
                     state["_step"],
@@ -348,6 +385,7 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
     async def node_extract_file(self, state: WorkflowState) -> Dict[str, Any]:
         """Extract and process uploaded files from session metadata"""
         try:
+            from pathlib import Path
             separator = "|" * 25
             logger.info(f"{separator} FILE EXTRACTION START {separator}")
             
@@ -374,6 +412,26 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
                 file_path = file_info.get("path") if isinstance(file_info, dict) else getattr(file_info, "path", None)
                 file_name = file_info.get("name") if isinstance(file_info, dict) else getattr(file_info, "filename", getattr(file_info, "name", "unknown"))
                 file_type = file_info.get("type") if isinstance(file_info, dict) else "unknown"
+                
+                # Auto-detect file type from extension if not provided
+                if file_type == "unknown" and file_name:
+                    ext = Path(file_name).suffix.lower()
+                    ext_mapping = {
+                        ".pdf": "pdf",
+                        ".xlsx": "excel",
+                        ".xls": "excel",
+                        ".csv": "excel",
+                        ".png": "image",
+                        ".jpg": "image",
+                        ".jpeg": "image",
+                        ".gif": "image",
+                        ".bmp": "image",
+                        ".webp": "image",
+                        ".txt": "text",
+                        ".doc": "word",
+                        ".docx": "word"
+                    }
+                    file_type = ext_mapping.get(ext, "unknown")
                 
                 metadata = {
                     "filename": file_name,
@@ -434,6 +492,7 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
             # Import file processing tools
             from ..tools.pdf_tools import analyze_pdf
             from ..tools.excel_tools import analyze_excel_to_markdown
+            from ..tools.image_tools import extract_text_from_image, analyze_image_with_llm, process_financial_image
             import uuid
             from pathlib import Path
             import os
@@ -491,11 +550,28 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
                             logger.error(f"Excel extraction failed for {file_name}: {excel_err}")
                     elif file_type == "image":
                         try:
-                            from ..tools.pdf_tools import extract_text_from_image
-                            extracted_text = extract_text_from_image(file_path)
-                            logger.info(f"Image OCR: {file_name}")
+                            # Use image processing pipeline (OCR + LLM vision analysis)
+                            image_result = process_financial_image(file_path)
+                            if image_result.get("success"):
+                                # Combine OCR text and LLM analysis for better understanding
+                                ocr_text = image_result.get("extracted_text", "")
+                                llm_analysis = image_result.get("analysis", "")
+                                extracted_text = f"=== OCR EXTRACTED TEXT ===\n{ocr_text}\n\n=== LLM VISION ANALYSIS ===\n{llm_analysis}"
+                                logger.info(f"Image processed with OCR + Vision Analysis: {file_name}")
+                            else:
+                                # Fallback: Try OCR only if full pipeline fails
+                                logger.warning(f"Full image pipeline failed, attempting OCR fallback for {file_name}")
+                                extracted_text = extract_text_from_image(file_path)
+                                logger.info(f"Image OCR (fallback): {file_name}")
                         except Exception as img_err:
-                            logger.error(f"Image extraction failed for {file_name}: {img_err}")
+                            logger.error(f"Image processing failed for {file_name}: {img_err}")
+                            # Try simple OCR as last resort
+                            try:
+                                extracted_text = extract_text_from_image(file_path)
+                                logger.info(f"Image extraction fallback successful: {file_name}")
+                            except Exception as ocr_fallback_err:
+                                logger.error(f"Image OCR fallback also failed: {ocr_fallback_err}")
+                                extracted_text = ""
                     else:
                         # Try reading as text
                         try:
@@ -505,21 +581,87 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
                             logger.warning(f"Could not extract text from {file_name}")
                     
                     if extracted_text and extracted_text.strip():
-                        # Chunk and ingest into vectordb
+                        # Use advanced chunking to create both structural and metric-centric chunks
                         try:
-                            chunks = rag_service.chunk_text(extracted_text, chunk_size=500, overlap=50)
-                            logger.info(f"Created {len(chunks)} chunks from {file_name}")
+                            # Use advanced chunking service for two-level chunking
+                            # Pass LLM for metric synthesis
+                            rag_service.advanced_chunking.llm = self.llm
+                            struct_payloads, metric_payloads = rag_service.advanced_chunking.process_document(
+                                text=extracted_text,
+                                file_id=file_id,
+                                user_id=user_id,
+                                chat_session_id=session_id
+                            )
                             
-                            if chunks:
+                            logger.info(f"Created {len(struct_payloads)} structural + {len(metric_payloads)} metric-centric chunks from {file_name}")
+                            
+                            if struct_payloads:
+                                # Add structural chunks
+                                logger.info(f"[INGEST] Storing {len(struct_payloads)} structural chunks...")
                                 chunk_count = rag_service.qd_manager.add_document_chunks(
                                     user_id=user_id,
                                     chat_session_id=session_id,
                                     file_id=file_id,
-                                    chunks=chunks,
+                                    chunks=struct_payloads,
                                     metadata={"filename": file_name, "file_type": file_type}
                                 )
                                 total_chunks += chunk_count
-                                logger.info(f"✅ Ingested {chunk_count} chunks from {file_name} into vectordb")
+                                logger.info(f"✅ Stored {chunk_count} structural chunks to Qdrant")
+                                
+                                # CRITICAL: Wait after structural chunks to ensure commit
+                                await asyncio.sleep(0.5)
+                            
+                            # Add metric-centric chunks if any (INDEPENDENT of struct_payloads)
+                            if metric_payloads:
+                                logger.info(f"[INGEST] Storing {len(metric_payloads)} metric-centric chunks...")
+                                metric_count = rag_service.qd_manager.add_document_chunks(
+                                    user_id=user_id,
+                                    chat_session_id=session_id,
+                                    file_id=file_id,
+                                    chunks=metric_payloads,
+                                    metadata={"filename": file_name, "file_type": file_type, "is_metric_centric": True}
+                                )
+                                total_chunks += metric_count
+                                logger.info(f"✅ Stored {metric_count} metric-centric chunks to Qdrant")
+                                
+                                # CRITICAL: Wait after metric chunks to ensure commit
+                                await asyncio.sleep(0.5)
+                            
+                            # CRITICAL: Wait for chunks to be fully committed before proceeding
+                            # Verify that chunks are searchable by attempting a metadata search
+                            if struct_payloads or metric_payloads:
+                                logger.info(f"⏳ Verifying chunks are indexed in Qdrant...")
+                                verified = False
+                                max_retries = 5
+                                retry_delay = 1  # Start with 1 second
+                                
+                                for attempt in range(max_retries):
+                                    try:
+                                        await asyncio.sleep(retry_delay)
+                                        
+                                        # Try to search for chunks by filename
+                                        verification_results = rag_service.search_by_filename_metadata(
+                                            user_id=user_id,
+                                            filename=file_name,
+                                            chat_session_id=session_id,
+                                            limit=1
+                                        )
+                                        
+                                        if verification_results:
+                                            logger.info(f"✅ Verification successful: {len(verification_results)} chunk(s) found in index")
+                                            verified = True
+                                            break
+                                        else:
+                                            logger.debug(f"Verification attempt {attempt + 1}: No chunks found yet, retrying...")
+                                            retry_delay = min(retry_delay * 1.5, 5)  # Exponential backoff, max 5s
+                                    
+                                    except Exception as verify_err:
+                                        logger.debug(f"Verification attempt {attempt + 1} failed: {verify_err}")
+                                
+                                if not verified:
+                                    logger.warning(f"⚠️ Could not verify chunks in index after {max_retries} attempts - proceeding anyway")
+                                else:
+                                    logger.info(f"✓ Chunks for '{file_name}' are ready for retrieval")
                             else:
                                 error_msg = f"No chunks created from {file_name} (may be empty or invalid format)"
                                 logger.error(error_msg)
@@ -567,6 +709,13 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
                 )
             
             logger.info(f"Ingested {len(file_metadata)} files with {total_chunks} total chunks")
+            
+            # CRITICAL: Final wait to ensure ALL chunks are fully committed before retrieval
+            if total_chunks > 0:
+                logger.info(f"⏳ Final verification: Ensuring all {total_chunks} chunks are indexed...")
+                await asyncio.sleep(2)  # Give Qdrant time to finalize indexing
+                logger.info(f"✅ All chunks committed and ready for retrieval")
+            
             logger.info(f"{separator} FILE INGESTION COMPLETE {separator}")
         except Exception as e:
             logger.error(f"File ingestion failed: {e}")
@@ -682,10 +831,21 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
         return state
     
     async def node_retrieve(self, state: WorkflowState) -> Dict[str, Any]:
-        """Retrieve with personal-first, global-fallback strategy"""
+        """
+        Retrieve with use-case-specific strategy and advanced techniques
+        
+        RETRIEVAL STRATEGIES (updated):
+        1. FILE UPLOAD → Retrieve by file_id/filename (prioritize uploaded files)
+        2. SUMMARY REQUEST → Metric-centric chunks + linked structural chunks (via RRF)
+        3. NON-SUMMARY DATA → Structural chunks only (normal retrieval)
+        4. HYBRID → Multi-strategy retrieval with RRF fusion
+        """
         try:
-            separator = "|" * 25
-            logger.info(f"{separator} RETRIEVAL START {separator}")
+            separator = "═" * 80
+            logger.info("")
+            logger.info(separator)
+            logger.info("RETRIEVAL NODE START (USE-CASE-SPECIFIC)")
+            logger.info(separator)
             
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started("RETRIEVE")
@@ -693,82 +853,152 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
             # Check if RAG is enabled for this request
             rag_enabled = state.get("rag_enabled", True)
             if not rag_enabled:
-                logger.info("RAG disabled - skipping retrieval")
+                logger.info("⊘ RAG disabled - skipping retrieval")
                 if self.observer and state.get("_step"):
                     await self.observer.emit_step_skipped(state["_step"], "RAG disabled")
+                logger.info(separator)
                 return state
             
             query = state.get("rewritten_prompt") or state.get("user_prompt")
             user_id = state.get("user_id")
             session_id = state.get("session_id")
             
-            # Extract uploaded filenames for retrieval priority
+            # Detect use case for strategic retrieval using LLM classification
+            logger.info("[RETRIEVE:STRATEGY] Detecting use case with LLM...")
+            
+            # Use LLM-based query classification (already handles generic vs specific)
+            from ..services.advanced_retrieval_service import QueryClassifier
+            classifier = QueryClassifier()
+            classification = classifier.classify_with_llm(query)
+            is_generic_query = classification["is_generic"]
+            
+            # IMPORTANT: Don't use hardcoded summary detection - LLM already classified!
+            # Only use summary if LLM explicitly says it's generic file analysis
+            is_summary_request = is_generic_query
+            
             uploaded_filenames = None
             uploaded_files = state.get("uploaded_files", [])
+            is_file_upload = len(uploaded_files) > 0
+            
             if uploaded_files:
                 # Extract filenames from uploaded_files metadata
-                # Note: files have 'name' field, not 'filename'
                 uploaded_filenames = [f.get("name", "") for f in uploaded_files if f.get("name")]
                 if uploaded_filenames:
-                    logger.info(f"Passing {len(uploaded_filenames)} uploaded filenames to retrieval: {uploaded_filenames}")
-                else:
-                    logger.warning(f"[RETRIEVE] No 'name' field found in uploaded_files: {uploaded_files}")
+                    logger.info(f"[RETRIEVE:STRATEGY] FILE UPLOAD detected: {len(uploaded_filenames)} file(s)")
+                    logger.info(f"  Files: {uploaded_filenames}")
             
-            # FALLBACK: If no filenames from state, extract from query
-            # This handles case where files were ingested but metadata wasn't propagated
+            # FALLBACK: Extract filenames from query if not in metadata
             if not uploaded_filenames and query:
-                logger.info(f"[RETRIEVE] No uploaded filenames from state - attempting to extract from query")
                 import re
-                # Look for common file patterns in the query
                 filename_pattern = r'([a-zA-Z0-9_\-\.]+\.(pdf|xlsx?|csv|docx?|pptx?|txt))'
                 filename_matches = re.findall(filename_pattern, query, re.IGNORECASE)
-                
                 if filename_matches:
-                    # Extract just the filename part (re.findall returns tuples)
                     extracted_filenames = [match[0] if isinstance(match, tuple) else match for match in filename_matches]
-                    # Remove duplicates while preserving order
                     seen = set()
                     uploaded_filenames = [f for f in extracted_filenames if not (f in seen or seen.add(f))]
-                    logger.info(f"[RETRIEVE] Extracted {len(uploaded_filenames)} filename(s) from query: {uploaded_filenames}")
-                else:
-                    logger.info(f"[RETRIEVE] No filenames found in query - proceeding without file context")
+                    logger.info(f"[RETRIEVE:STRATEGY] FILE NAMES extracted from query: {len(uploaded_filenames)} file(s)")
             
-            logger.info(f"Starting RAG retrieval (files may have been ingested)")
-            
-            results = await self.retrieval.retrieve_with_fallback(
-                query, user_id, session_id, uploaded_filenames=uploaded_filenames
-            )
-            
-            state["personal_semantic_results"] = results.get("personal_semantic", [])
-            state["personal_keyword_results"] = results.get("personal_keyword", [])
-            state["global_semantic_results"] = results.get("global_semantic", [])
-            state["global_keyword_results"] = results.get("global_keyword", [])
-            state["rag_enabled"] = results.get("total_results", 0) > 0
-            
-            # Log database reasoning
-            db_reasoning = results.get("db_reasoning", "")
-            if db_reasoning:
-                logger.info(f"[DB DECISION] {db_reasoning}")
-            
-            total = results.get("total_results", 0)
-            if total == 0:
-                logger.warning(f"⚠️  NO RAG RESULTS: Query returned 0 results from vectordb")
-                logger.info(f"   - Check if files were successfully ingested")
-                logger.info(f"   - Check if vectordb has data for user: {user_id}")
-                logger.info(f"   - Query: {query[:100]}...")
+            # Log detected strategy
+            if is_file_upload:
+                logger.info(f"[RETRIEVE:STRATEGY] ✓ FILE UPLOAD STRATEGY")
+            elif is_summary_request:
+                logger.info(f"[RETRIEVE:STRATEGY] ✓ SUMMARY/ANALYSIS STRATEGY (LLM: generic query)")
             else:
-                logger.info(f"✅ Retrieved {total} results from RAG")
+                logger.info(f"[RETRIEVE:STRATEGY] ✓ SPECIFIC DETAIL STRATEGY (LLM: specific query)")
+            
+            logger.info(f"[RETRIEVE:START] Query length: {len(query)}, Using advanced retrieval...")
+            
+            # Generate query embedding for advanced retrieval
+            from ..core.embeddings import get_embedding_strategy
+            embedding_strategy = get_embedding_strategy()
+            query_embedding = embedding_strategy.embed_query(query)
+            
+            # Use advanced retrieval with strategic parameters
+            try:
+                # For summary requests, prioritize metric-centric chunks
+                # For file uploads, retrieve all and let RRF rank them
+                # For general queries, use standard dual retrieval
+                
+                include_metrics = is_summary_request or is_file_upload
+                include_structural = True  # Always include structural for context
+                
+                logger.info(f"[RETRIEVE:CONFIG] include_metrics={include_metrics}, include_structural={include_structural}")
+                
+                # NOTE: advanced_retrieval.retrieve is synchronous, so wrap it with asyncio.to_thread
+                advanced_results = await asyncio.to_thread(
+                    self.advanced_retrieval.retrieve,
+                    user_id=user_id,
+                    query=query,
+                    query_embedding=query_embedding,
+                    chat_session_id=session_id,
+                    limit=15,  # Get more results for strategies
+                    include_metrics=include_metrics,
+                    include_structural=include_structural
+                )
+                
+                logger.info(f"[RETRIEVE:ADVANCED] Retrieved {len(advanced_results)} results using RRF + dedup")
+                logger.info(f"[RETRIEVE:ADVANCED] Chunk types: {', '.join(set([r.get('chunk_type', 'unknown') for r in advanced_results]))}")
+                
+                # Apply use-case-specific post-processing
+                if is_summary_request:
+                    # For summary: boost metric chunks
+                    metric_chunks = [r for r in advanced_results if r.get('chunk_type') == 'metric_centric']
+                    structural_chunks = [r for r in advanced_results if r.get('chunk_type') != 'metric_centric']
+                    logger.info(f"[RETRIEVE:PROCESS] Summary mode: {len(metric_chunks)} metric + {len(structural_chunks)} structural")
+                    # Reorder: metric chunks first, then structural
+                    advanced_results = metric_chunks + structural_chunks
+                
+                elif is_file_upload and uploaded_filenames:
+                    # For file upload: prioritize by filename match
+                    matching = [r for r in advanced_results if any(fname in r.get('filename', '') or fname in r.get('source', '') 
+                                                                   for fname in uploaded_filenames)]
+                    non_matching = [r for r in advanced_results if r not in matching]
+                    logger.info(f"[RETRIEVE:PROCESS] File upload mode: {len(matching)} from uploaded files + {len(non_matching)} others")
+                    advanced_results = matching + non_matching
+                
+                # Convert advanced results to old format for backward compatibility
+                state["personal_semantic_results"] = advanced_results[:8]   # Top 8
+                state["personal_keyword_results"] = advanced_results[8:15] if len(advanced_results) > 8 else []
+                state["global_semantic_results"] = []
+                state["global_keyword_results"] = []
+                
+                total = len(advanced_results)
+                state["rag_enabled"] = total > 0
+                
+                logger.info(f"[RETRIEVE:SUCCESS] ✓ Retrieved {total} results with {('SUMMARY' if is_summary_request else 'STANDARD')} strategy")
+                
+            except Exception as advanced_err:
+                logger.warning(f"[RETRIEVE:ADVANCED] Failed: {advanced_err}, falling back to legacy retrieval")
+                # Fallback to legacy retrieval
+                results = await self.retrieval.retrieve_with_fallback(
+                    query, user_id, session_id, uploaded_filenames=uploaded_filenames
+                )
+                
+                state["personal_semantic_results"] = results.get("personal_semantic", [])
+                state["personal_keyword_results"] = results.get("personal_keyword", [])
+                state["global_semantic_results"] = results.get("global_semantic", [])
+                state["global_keyword_results"] = results.get("global_keyword", [])
+                
+                total = results.get("total_results", 0)
+                state["rag_enabled"] = total > 0
+                
+                # Log database reasoning
+                db_reasoning = results.get("db_reasoning", "")
+                if db_reasoning:
+                    logger.info(f"  Database decision: {db_reasoning}")
+                
+                logger.info(f"✓ Retrieved {total} results with legacy retrieval (fallback)")
             
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_completed(
                     state["_step"],
-                    output_size=total * 500  # Est. bytes
+                    output_size=total * 500,  # Est. bytes
+                    metadata={"total_results": total}
                 )
             
-            logger.info(f"Retrieved {total} results (files now in collection)")
-            logger.info(f"{separator} RETRIEVAL COMPLETE {separator}")
+            logger.info(separator)
         except Exception as e:
-            logger.error(f"Retrieval failed: {e}")
+            logger.error(f"✗ Retrieval failed: {e}")
             state["rag_enabled"] = False
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_failed(state["_step"], str(e))
@@ -778,6 +1008,12 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
     async def node_filter(self, state: WorkflowState) -> Dict[str, Any]:
         """Filter and rank results with RRF"""
         try:
+            separator = "═" * 80
+            logger.info("")
+            logger.info(separator)
+            logger.info("FILTER NODE START")
+            logger.info(separator)
+            
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started("FILTER")
             
@@ -790,16 +1026,251 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
             
             state["best_search_results"] = best_results
             
+            logger.info(f"Filtered to {len(best_results)} results (deduplicated and ranked)")
+            
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_completed(
                     state["_step"],
-                    output_size=len(best_results) * 500
+                    output_size=len(best_results) * 500,
+                    metadata={"results": len(best_results)}
                 )
             
-            logger.info(f"Filtered to {len(best_results)} results")
+            logger.info(separator)
         except Exception as e:
-            logger.error(f"Filtering failed: {e}")
+            logger.error(f"✗ Filtering failed: {e}")
             state["best_search_results"] = []
+            if self.observer and state.get("_step"):
+                await self.observer.emit_step_failed(state["_step"], str(e))
+        
+        return state
+    
+    async def node_summary_tools(self, state: WorkflowState) -> Dict[str, Any]:
+        """
+        Summary Tools Node - LLM-driven selection of summary technique
+        
+        NEW ARCHITECTURE:
+        1. Check if summary is needed (rules-first + LLM fallback)
+        2. If yes: Let LLM SELECT which summary technique to use
+        3. Execute the selected summary tool with DB results + previous tool results
+        4. Store summary result separately for query reformulation
+        5. If no: Pass through without summarization
+        
+        This node receives:
+        - best_search_results: Filtered chunks from DB (structural + metric-centric)
+        - tool_results: Results from executed tools (if any)
+        - user_prompt: Original user query
+        
+        Returns:
+        - summary_applied: Boolean flag
+        - summary_result: Structured result from summary tool execution
+        - summary_tool_selected: Which technique was selected
+        """
+        try:
+            from src.core.llm_summary_tools import SummaryToolsProvider
+            
+            separator = "═" * 80
+            logger.info("")
+            logger.info(separator)
+            logger.info("SUMMARY TOOLS NODE (LLM-DRIVEN)")
+            logger.info(separator)
+            
+            if self.observer:
+                state["_step"] = await self.observer.emit_step_started("SUMMARY_TOOLS")
+            
+            # Get inputs
+            best_results = state.get("best_search_results", [])
+            tool_results = state.get("tool_results", {})
+            query = state.get("rewritten_prompt") or state.get("user_prompt", "")
+            
+            logger.info(f"[SUMMARY:INPUT] DB results: {len(best_results)} chunks, Query length: {len(query)}")
+            logger.info(f"[SUMMARY:INPUT] Previous tool results: {len(tool_results)} outputs")
+            
+            # Step 1: Determine if summary is needed (rules-first)
+            needs_summary = self.summary_tool_router.should_summarize(query)
+            logger.info(f"[SUMMARY:DETECT] Initial detection: needs_summary={needs_summary}")
+            
+            # Step 2: If unclear, use LLM to classify
+            if not needs_summary:
+                logger.info(f"[SUMMARY:CLASSIFY] Using LLM for classification...")
+                try:
+                    classify_prompt = f"""Analyze this user query: "{query}"
+
+Does the user ask for a SUMMARY, ANALYSIS, or EXPLANATION of financial data?
+Specifically, do they want you to:
+1. Summarize/aggregate data
+2. Analyze trends or changes  
+3. Detect anomalies
+4. Compare metrics
+5. Answer key financial questions
+
+Respond with ONLY "yes" or "no" (lowercase)."""
+                    
+                    llm_response = await asyncio.to_thread(
+                        lambda: self.llm.invoke(classify_prompt)
+                    )
+                    response_text = llm_response.content if hasattr(llm_response, 'content') else str(llm_response)
+                    needs_summary = 'yes' in response_text.lower()
+                    logger.info(f"[SUMMARY:CLASSIFY] LLM classification: needs_summary={needs_summary}")
+                except Exception as e:
+                    logger.warning(f"[SUMMARY:CLASSIFY] LLM classification failed: {e}, using initial detection")
+            
+            # If no summary needed or no data, skip
+            if not needs_summary or not best_results:
+                logger.info("⊘ Summary not applicable or no data available")
+                state["summary_applied"] = False
+                state["summary_result"] = None
+                state["summary_tool_selected"] = None
+                if self.observer and state.get("_step"):
+                    await self.observer.emit_step_skipped(state["_step"], "Summary not needed")
+                logger.info(separator)
+                return state
+            
+            # Step 3: Use LLM to SELECT 2-3 summary techniques
+            logger.info(f"[SUMMARY:SELECT] Using LLM to select 2-3 summary techniques...")
+            
+            # Get available summary tools and their descriptions
+            tool_descriptions = SummaryToolsProvider.get_tool_descriptions()
+            tools_text = "\n".join([
+                f"- {name}: {desc}"
+                for name, desc in tool_descriptions.items()
+            ])
+            
+            selection_prompt = f"""You have these summary techniques available:
+
+{tools_text}
+
+Given the user query: "{query}"
+And the financial data to summarize
+
+Select 2-3 summary techniques that work BEST TOGETHER for comprehensive analysis.
+Respond with ONLY the technique names (comma-separated, from: comparative_analysis, anomaly_detection, 
+materiality_weighted, narrative_arc, key_questions) - nothing else."""
+            
+            logger.debug(f"[SUMMARY:SELECT] Prompt sent to LLM:\n{selection_prompt}")
+            
+            try:
+                selection_response = await asyncio.to_thread(
+                    lambda: self.llm.invoke(selection_prompt)
+                )
+                response_text = selection_response.content if hasattr(selection_response, 'content') else str(selection_response)
+                logger.debug(f"[SUMMARY:SELECT] LLM raw response: {response_text}")
+                
+                # Extract technique names from response
+                response_lower = response_text.lower()
+                available_techniques = list(tool_descriptions.keys())
+                selected_techniques = []
+                
+                for technique in available_techniques:
+                    if technique in response_lower:
+                        selected_techniques.append(technique)
+                
+                # Ensure 2-3 techniques
+                if len(selected_techniques) < 2:
+                    fallback_techniques = [t for t in ['comparative_analysis', 'anomaly_detection', 'materiality_weighted'] if t not in selected_techniques]
+                    selected_techniques.extend(fallback_techniques[:max(0, 2 - len(selected_techniques))])
+                elif len(selected_techniques) > 3:
+                    selected_techniques = selected_techniques[:3]
+                
+                logger.info(f"[SUMMARY:SELECT] LLM selected {len(selected_techniques)} techniques: {selected_techniques}")
+                
+            except Exception as e:
+                logger.warning(f"[SUMMARY:SELECT] LLM selection failed: {e}, defaulting to [comparative_analysis, anomaly_detection]")
+                selected_techniques = ["comparative_analysis", "anomaly_detection"]
+            
+            # Step 4: Execute multiple summary tools
+            logger.info(f"[SUMMARY:EXECUTE] Executing {len(selected_techniques)} techniques with {len(best_results)} chunks")
+            
+            try:
+                summary_tools = SummaryToolsProvider.get_all_tools()
+                all_results = []
+                
+                for selected_technique in selected_techniques:
+                    summary_tool_func = summary_tools.get(selected_technique)
+                    
+                    if not summary_tool_func:
+                        logger.error(f"[SUMMARY:EXECUTE] Tool not found: {selected_technique}")
+                        continue
+                    
+                    # Execute tool with chunks and query
+                    logger.info(f"[SUMMARY:EXECUTE] Running {selected_technique}...")
+                    summary_result = await asyncio.to_thread(
+                        summary_tool_func, best_results, query
+                    )
+                    
+                    if summary_result.get("success"):
+                        all_results.append(summary_result)
+                        # Log RAW summary result
+                        logger.info(f"[SUMMARY:RESULT] RAW output from {selected_technique}:")
+                        logger.info(f"{summary_result}")
+                
+                if all_results:  # At least one technique succeeded
+                    summary_result = {
+                        "success": True,
+                        "techniques_executed": [r.get('technique', 'unknown') for r in all_results],
+                        "results": all_results,
+                        "combined_summary": "\n\n".join([r.get('summary', '') for r in all_results])
+                    }
+                    logger.info(f"[SUMMARY:EXECUTE] ✓ Executed {len(all_results)} techniques successfully")
+                    
+                    # Log FULL raw summary results
+                    logger.info(f"[SUMMARY:RESULT] FINAL RAW RESULTS:")
+                    logger.info(f"{summary_result}")
+                    
+                    # Add metadata
+                    summary_result["summary_tools_used"] = selected_techniques
+                    summary_result["previous_tool_results"] = tool_results if tool_results else None
+                    summary_result["source_chunks_count"] = len(best_results)
+                    
+                    # CRITICAL: Set these flags so query_reformulation knows summary was applied
+                    state["summary_applied"] = True
+                    state["summary_result"] = summary_result
+                    state["summary_tool_selected"] = selected_techniques
+                    state["summary_was_executed"] = True
+                    
+                    logger.info(f"[SUMMARY:EXECUTE] ✓ Summary result stored for reformulation")
+                    logger.info(f"[SUMMARY:EXECUTE] Techniques used: {selected_techniques}")
+                else:
+                    logger.warning(f"[SUMMARY:EXECUTE] All summary tools failed")
+                    state["summary_applied"] = False
+                    state["summary_result"] = None
+                    state["summary_tool_selected"] = None
+            
+            except Exception as e:
+                logger.error(f"[SUMMARY:EXECUTE] Exception during execution: {e}")
+                state["summary_applied"] = False
+                state["summary_result"] = None
+                state["summary_tool_selected"] = None
+                if self.observer and state.get("_step"):
+                    await self.observer.emit_step_failed(state["_step"], str(e))
+                logger.info(separator)
+                return state
+            
+            # Emit completion
+            if self.observer and state.get("_step"):
+                await self.observer.emit_step_completed(
+                    state["_step"],
+                    output_size=len(state["summary_result"].get('summary', '')) if state.get("summary_result") else 0,
+                    metadata={
+                        "summary_applied": state.get("summary_applied", False),
+                        "technique": selected_technique,
+                        "chunks_processed": len(best_results)
+                    }
+                )
+            
+            logger.info(separator)
+            
+            # DEBUG: Log exact state before returning
+            logger.info(f"[SUMMARY:STATE_BEFORE_RETURN]")
+            logger.info(f"  summary_applied = {state.get('summary_applied', 'NOT_SET')}")
+            logger.info(f"  summary_was_executed = {state.get('summary_was_executed', 'NOT_SET')}")
+            logger.info(f"  summary_result exists = {bool(state.get('summary_result'))}")
+            if state.get("summary_result"):
+                logger.info(f"  summary_result keys = {list(state['summary_result'].keys())}")
+        except Exception as e:
+            logger.error(f"⚠ Summary tools node failed: {e}", exc_info=True)
+            state["summary_applied"] = False
+            state["summary_result"] = None
+            state["summary_tool_selected"] = None
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_failed(state["_step"], str(e))
         
@@ -807,14 +1278,21 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
     
     async def node_query_reformulation(self, state: WorkflowState) -> Dict[str, Any]:
         """
-        Query Reformulation Node - Rewrite query with retrieved context
+        Query Reformulation Node - Rewrite query with retrieved context AND tool results
         
         Purpose:
-        - After retrieval and filtering, if results exist from either/both collections
-        - Combine original query + retrieved context to create an enriched query
-        - Feeds into subsequent reasoning steps with full context available
+        - After tool execution and optional summarization, combine original query with:
+          1. Summary result (if summarization was applied) OR retrieved context
+          2. Tool execution results (calculator, technical analysis, etc.)
+        - Create an enriched query for the LLM to reason with full context
         
-        This allows the LLM to reason with provided information rather than raw question
+        CRITICAL: This node MUST ensure LLM receives data to avoid hallucination
+        - If summary was applied: use summarized data (not raw chunks)
+        - If no summary: use retrieved chunks as-is
+        - If no RAG data AND no tool data → instruction for LLM to request more info
+        - If insufficient data → warn LLM about limitations
+        
+        This allows the LLM to synthesize information from multiple sources
         """
         try:
             if self.observer:
@@ -822,108 +1300,264 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
             
             original_query = state.get("user_prompt", "").strip()
             best_results = state.get("best_search_results", [])
+            tool_results = state.get("tool_results", {})
+            summary_result = state.get("summary_result")
+            summary_applied = state.get("summary_applied", False)
+            summary_was_executed = state.get("summary_was_executed", False)
+            
+            # CRITICAL: Log all summary-related state for debugging
+            logger.info(f"Summary state: applied={summary_applied}, was_executed={summary_was_executed}, has_result={bool(summary_result)}")
+            if summary_result:
+                logger.info(f"  Summary technique: {summary_result.get('technique', 'unknown')}")
+                logger.info(f"  Summary keys: {list(summary_result.keys())}")
             
             # Log separator for reformulation start
-            separator = "|" * 25
-            logger.info(f"{separator} QUERY REFORMULATION START {separator}")
-            logger.info(f"Original Query: {original_query}")
-            logger.info(f"Available Context: {len(best_results)} retrieved results")
+            separator = "═" * 80
+            logger.info("")
+            logger.info(separator)
+            logger.info("QUERY REFORMULATION NODE START")
+            logger.info(separator)
+            logger.info(f"Query: {original_query[:100]}...")
+            logger.info(f"RAG data available: {len(best_results)} results")
+            logger.info(f"Tool data available: {len(tool_results)} tools")
+            logger.info(f"Summary applied: {summary_applied}")
             
-            # Only reformulate if we have both results and a query
-            if not best_results or not original_query:
-                logger.info("No results to reformulate with - using original query")
-                state["reformulated_query"] = original_query
-                state["reformulation_context"] = ""
+            # Skip if no query
+            if not original_query:
+                logger.warning("⚠️  NO QUERY PROVIDED - Skipping reformulation")
+                state["reformulated_query"] = ""
                 if self.observer and state.get("_step"):
-                    await self.observer.emit_step_skipped(
-                        state["_step"],
-                        f"Insufficient context: {len(best_results)} results, query_len={len(original_query)}"
-                    )
-                logger.info(f"{separator} QUERY REFORMULATION SKIPPED {separator}")
+                    await self.observer.emit_step_skipped(state["_step"], "No query provided")
+                logger.info(separator)
                 return state
             
-            # Build context summary from retrieved results with FULL content
-            context_snippets = []
-            context_full = []
-            for i, result in enumerate(best_results[:5], 1):  # Use top 5 results
-                # Results can have 'text' or 'content' field depending on source
-                content_full = result.get("text") or result.get("content", "")
-                content_preview = content_full[:200] if content_full else ""  # Preview for logs
-                score = result.get("score", 0)
-                source = result.get("source", result.get("title", "unknown"))
+            # CRITICAL CHECK: If no RAG data AND no tool data AND no summary, warn the LLM
+            has_no_data = len(best_results) == 0 and len(tool_results) == 0 and not summary_applied
+            if has_no_data:
+                logger.warning("⚠️  NO DATA AVAILABLE - RAG returned 0 results, no tools executed, and no summary applied")
+                logger.warning("    LLM will be instructed to clarify with user instead of hallucinating")
+            
+            # Parse user request to identify what they're asking for
+            # This helps organize the context better for the LLM
+            logger.info("📋 STEP 1: Parse user request to identify action and sources")
+            
+            # Extract mentioned file names or specific sources from query
+            import re
+            file_mentions = re.findall(r'["\']?([a-zA-Z0-9_\-\.]+\.(txt|pdf|docx|xlsx|csv))["\']?', original_query, re.IGNORECASE)
+            if file_mentions:
+                mentioned_files = list(set([f[0] for f in file_mentions]))
+                logger.info(f"  ✓ Detected file references: {mentioned_files}")
+            else:
+                mentioned_files = []
+            
+            # Organize RAG results by source file
+            logger.info("📄 STEP 2: Organize retrieved data by source")
+            results_by_source = {}
+            if best_results:
+                for result in best_results:
+                    source = result.get("source", result.get("title", "unknown"))
+                    if source not in results_by_source:
+                        results_by_source[source] = []
+                    results_by_source[source].append(result)
+                logger.info(f"  ✓ Organized {len(best_results)} results from {len(results_by_source)} sources")
+            
+            # Build structured reformulation
+            logger.info("📝 STEP 3: Build structured context for LLM")
+            reformulation_parts = []
+            
+            # Section 1: User Request Summary
+            reformulation_parts.append("NGƯỜI DÙNG CÓ YÊU CẦU:")
+            reformulation_parts.append(f"Câu hỏi gốc: {original_query}")
+            if mentioned_files:
+                reformulation_parts.append(f"Tệp được đề cập: {', '.join(mentioned_files)}")
+            if tool_results:
+                reformulation_parts.append(f"Công cụ được sử dụng: {', '.join(tool_results.keys())}")
+            if summary_applied:
+                reformulation_parts.append(f"Kỹ thuật tóm tắt được áp dụng: {summary_result.get('technique', 'unknown')}")
+            elif best_results:
+                reformulation_parts.append(f"Số tài liệu được truy xuất: {len(best_results)}")
+            reformulation_parts.append("")
+            
+            # CRITICAL: If no data at all, add warning to context
+            if has_no_data:
+                reformulation_parts.append("THÔNG BÁO QUAN TRỌNG:")
+                reformulation_parts.append("Không có dữ liệu sẵn có từ:")
+                reformulation_parts.append("- Truy xuất từ cơ sở dữ liệu (0 kết quả)")
+                reformulation_parts.append("- Các công cụ phân tích (không có)")
+                reformulation_parts.append("- Tóm tắt (không được áp dụng)")
+                reformulation_parts.append("")
+                reformulation_parts.append("HƯỚNG DẪN CHO LLM:")
+                reformulation_parts.append("Yêu cầu người dùng làm rõ hoặc cung cấp thêm thông tin")
+                reformulation_parts.append("Không được tự tạo hoặc suy đoán dữ liệu tài chính")
+                reformulation_parts.append("")
+            
+            # Section 2: Summarized Data (if summary was applied or executed) OR Retrieved Data
+            # CRITICAL: Check if summary was actually executed, regardless of applied flag
+            if (summary_applied or summary_was_executed) and summary_result:
+                reformulation_parts.append("PHÂN TÍCH TÓM LƯỢC (ĐẬT KẾT CHỌN CÔNG CỤ PHÂN TÍCH):")
+                reformulation_parts.append(f"Kỹ thuật phân tích: {summary_result.get('technique', 'unknown').upper()}")
+                reformulation_parts.append(f"({summary_result.get('summary_tool_used', 'unknown')})")
                 
-                # For logging preview (show first 200 chars)
-                if content_preview:
-                    context_snippets.append(f"[{i}] ({source}, relevance: {score:.2f}): {content_preview}...")
-                else:
-                    context_snippets.append(f"[{i}] ({source}, relevance: {score:.2f}): [No content]")
+                # Add technique description
+                technique_to_desc = {
+                    "comparative_analysis": "Tập trung vào THAY ĐỔI (ví dụ: 'Doanh thu tăng tốc 12.1%' thay vì 'Doanh thu là $500M')",
+                    "anomaly_detection": "Phát hiện các BẤT THƯỜNG: mismatch driver, anomaly lịch sử, guidance miss/beat, mẫu mâu thuẫn",
+                    "materiality_weighted": "Phân bổ không gian: 50% top metrics, 35% medium, 15% low",
+                    "narrative_arc": "Cấu trúc như câu chuyện: Setup -> Conflict -> Resolution",
+                    "key_questions": "Trả lời câu hỏi chính: Tăng trưởng nhanh? Gia tốc? Lợi nhuận? Lâu dài? Guidance beat?"
+                }
+                technique_used = summary_result.get('summary_tool_used', 'unknown')
+                if technique_used in technique_to_desc:
+                    reformulation_parts.append(f"Mô tả: {technique_to_desc[technique_used]}")
                 
-                # For LLM reformulation (use FULL content)
-                if content_full:
-                    context_full.append(f"[Source {i}: {source}]\n{content_full}\n")
+                reformulation_parts.append(f"Độ tin cậy: {summary_result.get('confidence_score', 0):.1%}")
+                reformulation_parts.append("")
+                
+                # CRITICAL: Summarized data is the primary input, not raw chunks
+                reformulation_parts.append("KẾT QUẢ PHÂN TÍCH:")
+                
+                # Add summarized content
+                summary_text = summary_result.get('summary', '')
+                if summary_text:
+                    reformulation_parts.append(f"TÓM TẮT: {summary_text}")
+                
+                # Add specific insights from the selected technique
+                if 'insights' in summary_result:
+                    reformulation_parts.append("CHI TIẾT:")
+                    for insight in summary_result.get('insights', []):
+                        reformulation_parts.append(f"- {insight}")
+                
+                if 'anomalies' in summary_result:
+                    reformulation_parts.append("BẤT THƯỜNG PHÁT HIỆN:")
+                    for anomaly in summary_result.get('anomalies', []):
+                        reformulation_parts.append(f"- {anomaly}")
+                
+                if 'answers' in summary_result:
+                    reformulation_parts.append("CÂU TRẢ LỜI CHỦ ĐỀ:")
+                    for question, answer in summary_result.get('answers', {}).items():
+                        reformulation_parts.append(f"Q: {question} | A: {answer}")
+                
+                if 'sections' in summary_result:
+                    reformulation_parts.append("CẤU TRÚC PHÂN TÍCH:")
+                    for section_name, section_content in summary_result.get('sections', {}).items():
+                        reformulation_parts.append(f"{section_name}: {section_content}")
+                
+                reformulation_parts.append("")
+                
+                # Add structural chunks for additional context
+                reformulation_parts.append("DỮ LIỆU HỖ TRỢ (CẤU TRÚC TÀI LIỆU):")
+                reformulation_parts.append("Những đoạn tài liệu sau cung cấp ngữ cảnh cho phân tích:")
+                reformulation_parts.append("")
+                
+                # Filter to show only structural chunks for additional context
+                structural_chunks = [r for r in best_results if r.get('chunk_type') == 'structural']
+                for i, result in enumerate(structural_chunks[:3], 1):
+                    content = result.get("text") or result.get("content", "")
+                    source = result.get("source", result.get("filename", "unknown"))
+                    reformulation_parts.append(f"Đoạn {i} từ {source}:")
+                    if content:
+                        # Truncate to 200 chars for supporting context
+                        if len(content) > 200:
+                            reformulation_parts.append(f"{content[:200]}...")
+                        else:
+                            reformulation_parts.append(f"{content}")
+                    else:
+                        reformulation_parts.append("[Nội dung rỗng]")
+                
+                reformulation_parts.append("")
+                
+            elif results_by_source:
+                # No summary: use original retrieved chunks
+                reformulation_parts.append("DỮ LIỆU ĐƯỢC TRUY XUẤT TỪ CƠ SỞ DỮ LIỆU:")
+                
+                for source, results in results_by_source.items():
+                    reformulation_parts.append(f"TỪ TÀI LIỆU: {source}")
+                    for i, result in enumerate(results, 1):
+                        content = result.get("text") or result.get("content", "")
+                        score = result.get("score", 0)
+                        reformulation_parts.append(f"Đoạn {i} (độ liên quan: {score:.2f}):")
+                        # Include FULL content (not truncated) so LLM has complete context
+                        if content:
+                            reformulation_parts.append(f"{content}")
+                        else:
+                            reformulation_parts.append("[Nội dung rỗng]")
+                reformulation_parts.append("")
             
-            # Use FULL content for reformulation to LLM
-            context_text = "\n---\n".join(context_full)
+            # Section 3: Tool Results
+            if tool_results:
+                reformulation_parts.append("DỮ LIỆU TỪ CÁC CÔNG CỤ PHÂN TÍCH:")
+                
+                for tool_name, result in tool_results.items():
+                    reformulation_parts.append(f"CÔNG CỤ: {tool_name}")
+                    result_str = str(result)
+                    # Include FULL tool result (not truncated preview)
+                    if result_str:
+                        reformulation_parts.append(f"{result_str}")
+                    else:
+                        reformulation_parts.append("[Kết quả rỗng]")
+                reformulation_parts.append("")
             
-            logger.info(f"Building reformulated query with {len(best_results)} context results:")
-            for snippet in context_snippets:
-                logger.info(f"  {snippet}")
+            # Section 4: Instructions for the LLM
+            if has_no_data:
+                # Special instructions when no data
+                reformulation_parts.append("HƯỚNG DẪN CHO LLM:")
+                reformulation_parts.append("1. Không được hallucinate hoặc suy đoán dữ liệu tài chính")
+                reformulation_parts.append("2. Xin lỗi người dùng vì chưa thể trả lời")
+                reformulation_parts.append("3. Giải thích rõ lý do (không có dữ liệu)")
+                reformulation_parts.append("4. Hướng dẫn người dùng:")
+                reformulation_parts.append("   a) Tải lên tài liệu liên quan")
+                reformulation_parts.append("   b) Cung cấp thêm chi tiết về câu hỏi")
+                reformulation_parts.append("   c) Thử lại với câu hỏi khác")
+            else:
+                # Normal instructions when data exists
+                reformulation_parts.append("HƯỚNG DẪN CHO LLM:")
+                reformulation_parts.append("1. Dựa trên câu hỏi của người dùng ở trên")
+                reformulation_parts.append("2. Sử dụng dữ liệu từ các tài liệu được truy xuất")
+                reformulation_parts.append("3. Sử dụng dữ liệu từ các công cụ phân tích")
+                reformulation_parts.append("4. Kết hợp tất cả dữ liệu này để trả lời câu hỏi")
+                reformulation_parts.append("5. Chỉ rõ nguồn dữ liệu được sử dụng (tài liệu nào, công cụ nào)")
+                reformulation_parts.append("6. Nếu dữ liệu không đủ, hãy nói rõ điều đó")
+            reformulation_parts.append("")
             
-            logger.info(f"Full context prepared ({len(context_text)} chars) for LLM reformulation")
+            full_reformulated_query = "\n".join(reformulation_parts)
             
-            # Use LLM to reformulate the query
-            system_prompt = """Bạn là một chuyên gia phân tích truy vấn. 
-Nhiệm vụ của bạn là viết lại câu hỏi của người dùng kết hợp với thông tin đã truy xuất.
-
-HƯỚNG DẪN QUAN TRỌNG:
-1. Giữ nguyên ý định gốc của câu hỏi
-2. Kết hợp thông tin từ các kết quả đã truy xuất
-3. Làm cho truy vấn mới cụ thể hơn và có ngữ cảnh rõ ràng
-4. Giữ trong 1-2 câu, rõ ràng và hành động được
-
-ĐỊNH DẠNG ĐẦU RA:
-Chỉ trả về câu hỏi đã viết lại, không thêm giải thích.
-"""
+            # Log summary stats
+            logger.info("")
+            logger.info("REFORMULATION STATISTICS")
             
-            reformulation_prompt = ChatPromptTemplate.from_messages([
-                ("system", system_prompt),
-                ("human", f"""Câu hỏi gốc: {original_query}
-
-Thông tin đã truy xuất:
-{context_text}
-
-Viết lại câu hỏi để sử dụng tốt hơn thông tin này:""")
-            ])
+            reformulation_lines = full_reformulated_query.split('\n')
+            total_lines = len(reformulation_lines)
+            total_chars = len(full_reformulated_query)
             
-            chain = reformulation_prompt | self.llm
-            response = await chain.ainvoke({})
+            logger.info(f"Total Lines: {total_lines}")
+            logger.info(f"Total Characters: {total_chars:,}")
+            logger.info(f"RAG Sources: {len(results_by_source)}")
+            logger.info(f"Tool Results: {len(tool_results)}")
+            logger.info(f"Data Status: {'NO DATA' if has_no_data else 'DATA AVAILABLE'}")
             
-            reformulated_query = response.content.strip()
-            state["reformulated_query"] = reformulated_query
-            state["reformulation_context"] = context_text
+            logger.info("Reformulation complete")
+            logger.info("")
             
-            logger.info(f"Reformulated Query: {reformulated_query}")
-            logger.info(f"Context Summary ({len(best_results)} results available):")
-            for snippet in context_snippets:
-                logger.info(f"  {snippet}")
+            # Log RAW reformulated query being sent to LLM
+            logger.info("[QUERY_REFORMULATION] RAW REFORMULATED QUERY TO BE SENT TO LLM:")
+            logger.info(full_reformulated_query)
             
-            # Log full reformulated query (not just preview)
-            logger.info(f"\n{'FULL REFORMULATED QUERY':^60}")
-            logger.info(f"{reformulated_query}")
-            logger.info(f"{'END REFORMULATED QUERY':^60}\n")
+            # Set the reformulated query as the new prompt for the LLM
+            state["reformulated_query"] = full_reformulated_query
             
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_completed(
                     state["_step"],
-                    output_size=len(reformulated_query),
+                    output_size=len(full_reformulated_query),
                     metadata={
-                        "context_results": len(best_results),
-                        "original_query_len": len(original_query),
-                        "reformulated_query_len": len(reformulated_query)
+                        "rag_sources": len(results_by_source),
+                        "rag_results": len(best_results),
+                        "tool_results": len(tool_results),
+                        "mentioned_files": len(mentioned_files),
+                        "total_chars": total_chars,
+                        "has_no_data": has_no_data
                     }
                 )
-            
-            logger.info(f"{separator} QUERY REFORMULATION COMPLETE {separator}")
             
         except Exception as e:
             logger.error(f"Query reformulation failed: {e}", exc_info=True)
@@ -937,8 +1571,11 @@ Viết lại câu hỏi để sử dụng tốt hơn thông tin này:""")
     async def node_analyze(self, state: WorkflowState) -> Dict[str, Any]:
         """Analyze detected data types"""
         try:
-            separator = "|" * 25
-            logger.info(f"{separator} DATA ANALYSIS START {separator}")
+            separator = "═" * 80
+            logger.info("")
+            logger.info(separator)
+            logger.info("DATA ANALYSIS NODE START")
+            logger.info(separator)
             
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started("ANALYZE")
@@ -950,24 +1587,121 @@ Viết lại câu hỏi để sử dụng tốt hơn thông tin này:""")
             state["text_only"] = analysis.get("text_only", True)
             state["detected_data_types"] = analysis.get("detected_types", [])
             
+            logger.info(f"Data types detected:")
+            logger.info(f"  Table data: {state['has_table_data']}")
+            logger.info(f"  Numeric data: {state['has_numeric_data']}")
+            logger.info(f"  Types: {state['detected_data_types']}")
+            
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_completed(
                     state["_step"],
                     metadata={
                         "has_table": state["has_table_data"],
-                        "has_numeric": state["has_numeric_data"]
+                        "has_numeric": state["has_numeric_data"],
+                        "types": state["detected_data_types"]
                     }
                 )
             
-            logger.info(f"Analyzed: table={state['has_table_data']}, numeric={state['has_numeric_data']}")
-            logger.info(f"{separator} DATA ANALYSIS COMPLETE {separator}")
+            logger.info(separator)
         except Exception as e:
-            logger.error(f"Analysis failed: {e}")
+            logger.error(f"✗ Analysis failed: {e}")
             state["text_only"] = True
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_failed(state["_step"], str(e))
         
         return state
+    
+    async def _select_tools_with_llm(self, query: str, available_tools: List[str]) -> List[str]:
+        """
+        Use LLM to intelligently select which tools to use for the query.
+        This is the intelligent fallback when keyword matching fails.
+        
+        Args:
+            query: User's query/question
+            available_tools: List of tool names available in the system
+            
+        Returns:
+            List of selected tool names
+        """
+        try:
+            from langchain_core.prompts import ChatPromptTemplate
+            
+            # Build tool descriptions
+            tool_descriptions = {
+                "get_company_info": "Get company information (name, industry, capital, activities)",
+                "get_shareholders": "Get shareholder information (major shareholders, ownership structure)",
+                "get_officers": "Get company leadership (CEO, chairman, directors, management team)",
+                "get_subsidiaries": "Get subsidiary and related company information",
+                "get_company_events": "Get company events (dividends, ĐHCĐ, shareholder meetings)",
+                "get_historical_data": "Get historical stock price data (OHLCV)",
+                "calculate_sma": "Calculate Simple Moving Average (trend analysis)",
+                "calculate_rsi": "Calculate Relative Strength Index (momentum indicator)"
+            }
+            
+            tools_text = "\n".join([
+                f"- {tool}: {tool_descriptions.get(tool, 'Tool')}"
+                for tool in available_tools
+            ])
+            
+            prompt = ChatPromptTemplate.from_template("""
+You are an expert financial analyst assistant. Given a user query, select ONLY the most relevant tools.
+
+Available Tools:
+{{tools}}
+
+User Query: {{query}}
+
+STRICT SELECTION RULES:
+1. Analyze the query keywords to determine what information is needed
+2. Match tools ONLY if query clearly requests that specific information
+3. Select 1-3 tools MAXIMUM
+4. Prefer more specific tools over generic ones
+5. If query asks about company data → use get_company_info (not all company tools)
+6. If query asks about stock price → use get_historical_data
+7. If query asks about technical indicators → use calculate_sma or calculate_rsi (NOT both unless explicitly asked for both)
+8. If query is general/chitchat → return "none"
+9. Return ONLY tool names, comma-separated, or "none"
+
+EXAMPLES:
+- "What is the price history of VNM?" → get_historical_data
+- "Is VNM a good buy?" → get_historical_data,calculate_rsi
+- "Who are the CEOs?" → get_officers
+- "Hello" → none
+- "Calculate 20-day SMA" → calculate_sma
+- "Give me all info about VCB" → get_company_info
+
+Your response (tool names only, nothing else):""")
+            
+            chain = prompt | self.llm
+            response = await chain.ainvoke({
+                "tools": tools_text,
+                "query": query
+            })
+            
+            # Parse response - extract tool names with stricter validation
+            tools_str = response.content.strip().lower().strip(".,!?;:")
+            
+            if tools_str == "none" or not tools_str:
+                logger.info("LLM: No suitable tools found (strict selection)")
+                return []
+            
+            # Validate and extract tool names - only accept known tools
+            selected = []
+            for tool in available_tools:
+                # Match tool names more carefully
+                if f"{tool.lower()}" in tools_str or tools_str in f"{tool.lower()}":
+                    if tool not in selected:  # Avoid duplicates
+                        selected.append(tool)
+            
+            # Limit to max 3 tools
+            selected = selected[:3]
+            
+            logger.info(f"LLM Tool Selection (strict): query='{query[:50]}...' → tools={selected}")
+            return selected
+            
+        except Exception as e:
+            logger.warning(f"LLM tool selection failed: {e}, returning empty list")
+            return []
     
     async def node_select_tools(self, state: WorkflowState) -> Dict[str, Any]:
         """
@@ -984,14 +1718,17 @@ Viết lại câu hỏi để sử dụng tốt hơn thông tin này:""")
         - "RSI, quá mua" → calculate_rsi
         """
         try:
-            separator = "|" * 25
-            logger.info(f"{separator} TOOL SELECTION START {separator}")
+            separator = "═" * 80
+            logger.info("")
+            logger.info(separator)
+            logger.info("TOOL SELECTION NODE START")
+            logger.info(separator)
             
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started("SELECT_TOOLS")
             
             query = state.get("user_prompt", "").lower()
-            logger.info(f"Query for tool selection: {query[:100]}...")
+            logger.info(f"Query: {query[:80]}...")
             
             # Tool selection matrix (from original system prompt)
             tool_keywords = {
@@ -1004,57 +1741,58 @@ Viết lại câu hỏi để sử dụng tốt hơn thông tin này:""")
                     "pattern": r"(cổ đông|nắm giữ|shareholder|sở hữu cổ phần)"
                 },
                 "get_officers": {
-                    "keywords": ["ban lãnh đạo", "CEO", "lãnh đạo", "chủ tịch", "giám đốc", "leadership"],
-                    "pattern": r"(lãnh đạo|CEO|chủ tịch|giám đốc|quản lý)"
+                    "keywords": ["ban lãnh đạo", "ceo", "lãnh đạo", "chủ tịch", "giám đốc", "leadership"],
+                    "pattern": r"(lãnh đạo|ceo|chủ tịch|giám đốc|quản lý)"
                 },
                 "get_subsidiaries": {
                     "keywords": ["công ty con", "liên kết", "subsidiary", "con"],
                     "pattern": r"(công ty con|liên kết|subsidiary)"
                 },
                 "get_company_events": {
-                    "keywords": ["sự kiện", "cổ tức", "ĐHCĐ", "event", "dividend"],
-                    "pattern": r"(sự kiện|cổ tức|ĐHCĐ|event|chia)"
+                    "keywords": ["sự kiện", "cổ tức", "đhcđ", "event", "dividend"],
+                    "pattern": r"(sự kiện|cổ tức|đhcđ|event|chia)"
                 },
                 "get_historical_data": {
-                    "keywords": ["giá", "OHLCV", "lịch sử", "price", "history"],
-                    "pattern": r"(giá|OHLCV|lịch sử|price|history|3 tháng|6 tháng|1 năm)"
+                    "keywords": ["giá", "ohlcv", "lịch sử", "price", "history"],
+                    "pattern": r"(giá|ohlcv|lịch sử|price|history|3 tháng|6 tháng|1 năm)"
                 },
                 "calculate_sma": {
-                    "keywords": ["SMA", "moving average", "xu hướng", "trend"],
-                    "pattern": r"(SMA|moving average|xu hướng|trend|MA)"
+                    "keywords": ["sma", "moving average", "xu hướng", "trend"],
+                    "pattern": r"(sma|moving average|xu hướng|trend|ma)"
                 },
                 "calculate_rsi": {
-                    "keywords": ["RSI", "quá mua", "quá bán", "overbought", "oversold"],
-                    "pattern": r"(RSI|quá mua|quá bán|overbought|oversold)"
+                    "keywords": ["rsi", "quá mua", "quá bán", "overbought", "oversold"],
+                    "pattern": r"(rsi|quá mua|quá bán|overbought|oversold)"
                 }
             }
             
             selected_tools = []
             matched_keywords = {}
             
-            logger.info("🔍 TOOL SELECTION REASONING:")
+            logger.info("Tool matching:")
             for tool_name, config in tool_keywords.items():
-                matched = [kw for kw in config["keywords"] if kw in query]
+                # Use lowercase for case-insensitive keyword matching
+                matched = [kw for kw in config["keywords"] if kw.lower() in query]
                 if matched:
                     selected_tools.append(tool_name)
                     matched_keywords[tool_name] = matched
-                    logger.info(f"  ✅ {tool_name}: matched keywords {matched}")
+                    logger.info(f"  ✓ {tool_name} → {', '.join(matched)}")
                 else:
-                    logger.info(f"  ❌ {tool_name}: no keyword matches")
+                    logger.info(f"  ✗ {tool_name}")
             
-            # If no tools matched by keywords, try to use classifier
+            # If no tools matched by keywords, use LLM for intelligent selection
             if not selected_tools:
-                logger.info("❌ No keyword matches found - using LLM classifier")
-                selection = await self.tool_selector.select_tools(
+                logger.info("No keyword matches - using LLM for intelligent selection")
+                selected_tools = await self._select_tools_with_llm(
                     state.get("user_prompt", ""),
-                    state.get("detected_data_types", []),
-                    self.tool_names,
-                    state.get("conversation_history", [])
+                    self.tool_names
                 )
-                selected_tools = selection.get("selected_tools", [])
-                logger.info(f"  Classifier selected: {selected_tools}")
+                if selected_tools:
+                    logger.info(f"LLM selected: {selected_tools}")
+                else:
+                    logger.info(f"LLM selected: none")
             else:
-                logger.info(f"✅ Keyword-based selection successful: {len(selected_tools)} tool(s)")
+                logger.info(f"Keyword-based selection: {len(selected_tools)} tool(s)")
             
             state["selected_tools"] = selected_tools
             state["primary_tool"] = selected_tools[0] if selected_tools else None
@@ -1066,10 +1804,9 @@ Viết lại câu hỏi để sử dụng tốt hơn thông tin này:""")
                     metadata={"tools_selected": len(selected_tools), "tools": selected_tools}
                 )
             
-            logger.info(f"Final decision: {len(selected_tools)} tool(s) selected")
-            logger.info(f"{separator} TOOL SELECTION COMPLETE {separator}")
+            logger.info(separator)
         except Exception as e:
-            logger.error(f"Tool selection failed: {e}")
+            logger.error(f"✗ Tool selection failed: {e}")
             state["selected_tools"] = []
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_failed(state["_step"], str(e))
@@ -1078,10 +1815,12 @@ Viết lại câu hỏi để sử dụng tốt hơn thông tin này:""")
     
     async def node_generate(self, state: WorkflowState) -> Dict[str, Any]:
         """
-        Generate answer with LLM using original system prompt logic.
+        Generate final answer with LLM using reformulated query and formatted data.
         
         Implements:
         - Vietnamese financial advisor instructions
+        - Uses reformulated query (query + RAG context + tool results)
+        - Uses formatted output from FORMAT_OUTPUT node
         - Table formatting rules for structured data
         - Data interpretation guidelines (SMA, RSI meanings)
         - Error handling and user guidance
@@ -1094,40 +1833,103 @@ Viết lại câu hỏi để sử dụng tốt hơn thông tin này:""")
             from ..llm import LLMFactory
             LLMFactory.mark_first_use()
             
-            query = state.get("user_prompt", "").strip()
+            separator = "|" * 25
+            logger.info(f"{separator} GENERATE START {separator}")
+            
+            # Detailed state tracking - check what's actually in the state
+            logger.info("")
+            logger.info("🔍 STATE VERIFICATION AT GENERATE NODE START:")
+            logger.info("═" * 80)
+            
+            # Check reformulated_query
+            reformulated_query_raw = state.get("reformulated_query", "")
+            logger.info(f"1. reformulated_query:")
+            logger.info(f"   - Exists: {bool(reformulated_query_raw)}")
+            logger.info(f"   - Type: {type(reformulated_query_raw).__name__}")
+            logger.info(f"   - Length: {len(reformulated_query_raw)} chars")
+            if reformulated_query_raw:
+                logger.info(f"   - Preview: {reformulated_query_raw[:150]}...")
+            else:
+                logger.info(f"   - WARNING: reformulated_query is EMPTY!")
+            
+            # Check user_prompt
+            user_prompt_raw = state.get("user_prompt", "")
+            logger.info(f"2. user_prompt (fallback):")
+            logger.info(f"   - Exists: {bool(user_prompt_raw)}")
+            logger.info(f"   - Type: {type(user_prompt_raw).__name__}")
+            logger.info(f"   - Length: {len(user_prompt_raw)} chars")
+            
+            # Check formatted_answer
+            formatted_answer_raw = state.get("formatted_answer", "")
+            logger.info(f"3. formatted_answer:")
+            logger.info(f"   - Exists: {bool(formatted_answer_raw)}")
+            logger.info(f"   - Type: {type(formatted_answer_raw).__name__}")
+            logger.info(f"   - Length: {len(formatted_answer_raw)} chars")
+            
+            # Check tool_results
+            tool_results_raw = state.get("tool_results", {})
+            logger.info(f"4. tool_results:")
+            logger.info(f"   - Exists: {bool(tool_results_raw)}")
+            logger.info(f"   - Type: {type(tool_results_raw).__name__}")
+            logger.info(f"   - Count: {len(tool_results_raw)} tools")
+            logger.info(f"   - Tools: {list(tool_results_raw.keys())}")
+            
+            logger.info("═" * 80)
+            logger.info("")
+            
+            # Use reformulated query (which includes RAG + tool context)
+            reformulated_query = reformulated_query_raw.strip()
+            user_prompt_fallback = user_prompt_raw.strip()
+            query = reformulated_query if reformulated_query else user_prompt_fallback
+            
             has_files = bool(state.get("uploaded_files"))
-            reformulated_query = state.get("reformulated_query", "")
+            formatted_output = formatted_answer_raw
+            tool_results = tool_results_raw
+            best_results = state.get("best_search_results", [])
+            
+            # Log which query is being used
+            logger.info("")
+            logger.info("║" + "=" * 77 + "║")
+            logger.info("║ QUERY BEING SENT TO LLM (GENERATION STEP):".ljust(79) + "║")
+            logger.info("╠" + "=" * 77 + "╣")
+            logger.info(f"║ Source: {'REFORMULATED QUERY (RAG + Tools)' if reformulated_query else 'FALLBACK: Original user prompt':<43} ║")
+            logger.info(f"║ Length: {len(query):,} characters{' ' * (36 - len(str(len(query))))} ║")
+            logger.info("╠" + "=" * 77 + "╣")
+            logger.info(query)
+            logger.info("╠" + "=" * 77 + "╣")
+            logger.info(f"║ End of query being sent to LLM".ljust(79) + "║")
+            logger.info("║" + "=" * 77 + "║")
+            logger.info("")
+            
+            logger.info(f"📊 Available Data for LLM:")
+            logger.info(f"  ✓ Formatted output: {len(formatted_output):,} chars")
+            logger.info(f"  ✓ Tool results: {len(tool_results)} tools")
+            logger.info(f"  ✓ RAG results: {len(best_results)} items")
             
             # Check if this is just a file upload without actual content query
-            # (query ONLY contains filename, no actual analysis request)
             is_file_only_query = False
             if has_files and query:
-                # Get file names from uploaded files
                 file_names = [
                     f.get("name", "") if isinstance(f, dict) else str(f)
                     for f in state.get("uploaded_files", [])
                 ]
                 
-                # Remove filenames from query to see if there's actual content
                 query_without_filenames = query.lower()
                 for fname in file_names:
                     query_without_filenames = query_without_filenames.replace(fname.lower(), "").replace(fname.split(".")[0].lower(), "")
                 
-                # Check if remaining query is just generic file keywords (no specific analysis)
                 query_without_filenames = query_without_filenames.replace(":", "").replace("-", "").strip()
                 generic_keywords = ["phân tích", "tóm tắt", "file", "tệp", "sau", "và"]
                 
-                # If query only contains generic keywords and filenames, it's file-only
                 if query_without_filenames:
                     remaining_words = [w for w in query_without_filenames.split() if w and w not in generic_keywords]
-                    is_file_only_query = len(remaining_words) == 0  # Only generic keywords remain
+                    is_file_only_query = len(remaining_words) == 0
                 else:
-                    is_file_only_query = True  # Empty after removing filenames
+                    is_file_only_query = True
             
             # If no specific query was provided, ask user for clarification
             if has_files and is_file_only_query:
                 uploaded_files = state.get("uploaded_files", [])
-                # Handle both string filenames and dict objects
                 file_list = ", ".join([
                     f.get("name", "tệp") if isinstance(f, dict) else str(f)
                     for f in uploaded_files
@@ -1151,9 +1953,9 @@ Viết lại câu hỏi để sử dụng tốt hơn thông tin này:""")
 **Lưu ý:** Tôi sẽ xử lý tệp của bạn và tìm kiếm thông tin dựa trên câu hỏi cụ thể của bạn. Vui lòng cung cấp chi tiết về những gì bạn cần!"""
                 
                 state["generated_answer"] = response_text
-                logger.info(f"File uploaded without specific query - providing guidance (files: {len(uploaded_files)})")
+                logger.info(f"File uploaded without specific query - providing guidance")
             else:
-                # System prompt from original (adapted for Vietnamese)
+                # System prompt for financial advisor
                 system_prompt = """Bạn là một chuyên gia tư vấn tài chính chuyên về thị trường chứng khoán Việt Nam.
 
 NHIỆM VỤ:
@@ -1187,37 +1989,64 @@ QUY TẮC TRẢ LỜI:
    - Gợi ý cách sửa nếu có thể
    - Hướng dẫn người dùng kiểm tra lại thông tin đầu vào"""
                 
-                context = ""
+                # Ensure system_prompt doesn't have unmatched braces for LangChain template parsing
+                # Replace any literal braces with escaped versions for template safety
+                system_prompt = system_prompt.replace("{", "{{").replace("}", "}}")
                 
-                if state.get("best_search_results"):
-                    context = "\n\n".join([
-                        f"[{r.get('source', 'Source')}]: {r.get('content', '')[:300]}"
-                        for r in state["best_search_results"][:5]
-                    ])
+                # Build prompt with formatted data
+                user_prompt_content = f"""Câu hỏi: {query}"""
                 
-                prompt = ChatPromptTemplate.from_messages([
+                if formatted_output:
+                    logger.info(f"Including formatted output in prompt ({len(formatted_output)} chars)")
+                    user_prompt_content += f"""
+
+Dữ liệu đã được xử lý và định dạng:
+{formatted_output}"""
+                
+                if tool_results and not formatted_output:
+                    logger.info(f"Including raw tool results ({len(tool_results)} tools)")
+                    for tool_name, result in tool_results.items():
+                        user_prompt_content += f"""
+
+Kết quả từ công cụ '{tool_name}':
+{result}"""
+                
+                logger.info(f"Generating answer with prompt ({len(user_prompt_content)} chars)...")
+                
+                # Escape braces in user_prompt_content for LangChain template parsing
+                # Tool results may contain unescaped braces that need to be escaped
+                escaped_user_prompt = user_prompt_content.replace("{", "{{").replace("}", "}}")
+                
+                # Create prompt and generate answer
+                generation_prompt = ChatPromptTemplate.from_messages([
                     ("system", system_prompt),
-                    ("human", "Câu hỏi: {query}\n\nDữ liệu bổ sung:\n{context}\n\nHãy trả lời:")
+                    ("human", escaped_user_prompt)
                 ])
-                chain = prompt | self.llm
                 
-                response = await chain.ainvoke({
-                    "query": query,
-                    "context": context or "Không có dữ liệu bổ sung"
-                })
+                chain = generation_prompt | self.llm
+                response = await chain.ainvoke({})
                 
-                state["generated_answer"] = response.content
-                logger.info(f"Answer generated ({len(response.content)} chars)")
+                generated_answer = response.content.strip()
+                state["generated_answer"] = generated_answer
+                
+                logger.info(f"Generated answer ({len(generated_answer)} chars)")
+                logger.info(f"Answer preview:\n{generated_answer[:500]}...")
             
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_completed(
                     state["_step"],
-                    output_size=len(state.get("generated_answer", ""))
+                    output_size=len(state.get("generated_answer", "")),
+                    metadata={
+                        "query_len": len(query),
+                        "has_formatted_output": bool(formatted_output),
+                        "tool_count": len(tool_results)
+                    }
                 )
             
+            logger.info(f"{separator} GENERATE COMPLETE {separator}")
         except Exception as e:
-            logger.error(f"Generation failed: {e}")
-            state["generated_answer"] = f"Xin lỗi, tôi gặp lỗi khi xử lý câu hỏi của bạn: {str(e)}"
+            logger.error(f"Generation failed: {e}", exc_info=True)
+            state["generated_answer"] = "Tôi gặp lỗi khi xử lý câu hỏi của bạn. Vui lòng thử lại."
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_failed(state["_step"], str(e))
         
@@ -1226,8 +2055,13 @@ QUY TẮC TRẢ LỜI:
     async def node_execute_tools(self, state: WorkflowState) -> Dict[str, Any]:
         """Execute selected tools"""
         try:
-            separator = "|" * 25
-            logger.info(f"{separator} TOOL EXECUTION START {separator}")
+            import inspect
+            
+            separator = "═" * 80
+            logger.info("")
+            logger.info(separator)
+            logger.info("TOOL EXECUTION NODE START")
+            logger.info(separator)
             
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started(
@@ -1236,43 +2070,125 @@ QUY TẮC TRẢ LỜI:
                 )
             
             selected = state.get("selected_tools", [])
-            logger.info(f"Tools to execute: {selected if selected else 'none selected'}")
             
             if not selected:
-                logger.info("No tools selected")
+                logger.info("⊘ No tools selected - skipping execution")
                 if self.observer and state.get("_step"):
                     await self.observer.emit_step_skipped(
                         "EXECUTE_TOOLS", "No tools selected"
                     )
+                logger.info(separator)
                 return state
             
+            logger.info(f"Executing {len(selected)} tool(s): {', '.join(selected)}")
+            
             tool_results = {}
+            query = state.get("user_prompt", "")
+            retrieved_context = state.get("retrieved_context", [])
             
             for tool_name in selected:
                 try:
-                    logger.info(f"  Executing tool: {tool_name}")
+                    logger.info(f"  Executing: {tool_name}")
+                    
+                    # Find tool by name
                     tool = next((t for t in self.tools if getattr(t, 'name', '') == tool_name), None)
-                    if tool and hasattr(tool, 'func'):
-                        result = await tool.func(state.get("user_prompt", ""))
-                        tool_results[tool_name] = result
-                        logger.info(f"  ✅ {tool_name} completed")
+                    
+                    if not tool:
+                        logger.warning(f"  ✗ Tool not found: {tool_name}")
+                        continue
+                    
+                    # Use LLM to generate proper tool parameters from the query
+                    if hasattr(tool, 'args_schema'):
+                        # Get the schema
+                        schema = tool.args_schema
+                        schema_fields = schema.model_fields if hasattr(schema, 'model_fields') else {}
+                        
+                        # Build prompt for LLM to extract parameters
+                        param_prompt = f"""Given the user query: "{query}"
+                        
+Extract parameters for the tool '{tool_name}' with the following fields:
+{chr(10).join([f"- {field_name}: {field_info.description or 'required'}" for field_name, field_info in schema_fields.items()])}
+
+Return a JSON object with the extracted parameters."""
+                        
+                        try:
+                            # Call LLM to extract parameters
+                            llm_response = await asyncio.to_thread(
+                                lambda: self.llm.invoke(param_prompt)
+                            )
+                            response_text = llm_response.content if hasattr(llm_response, 'content') else str(llm_response)
+                            
+                            # Parse JSON from response
+                            import json
+                            import re
+                            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                            if json_match:
+                                params = json.loads(json_match.group())
+                                # Call tool with extracted parameters
+                                if hasattr(tool, 'invoke'):
+                                    result = await asyncio.to_thread(tool.invoke, params)
+                                elif hasattr(tool, 'func') and callable(tool.func):
+                                    result = await asyncio.to_thread(tool.func, **params)
+                                else:
+                                    result = await asyncio.to_thread(tool, **params)
+                            else:
+                                result = await asyncio.to_thread(tool.invoke, {"input": query})
+                        except Exception as e:
+                            logger.warning(f"  Parameter extraction failed, using direct call")
+                            result = await asyncio.to_thread(tool.invoke, {"input": query})
                     else:
-                        logger.warning(f"  ❌ Tool {tool_name} not found or has no func method")
+                        # No structured schema, call directly with query
+                        if hasattr(tool, 'func') and callable(tool.func):
+                            func = tool.func
+                        elif callable(tool):
+                            func = tool
+                        else:
+                            logger.warning(f"  ✗ Tool not callable: {tool_name}")
+                            continue
+                        
+                        if inspect.iscoroutinefunction(func):
+                            result = await func(query)
+                        else:
+                            result = await asyncio.to_thread(func, query)
+                    
+                    if result is not None:
+                        # Check if the result is a failure (has success: false)
+                        is_failed_result = False
+                        if isinstance(result, str):
+                            try:
+                                import json
+                                result_obj = json.loads(result)
+                                if isinstance(result_obj, dict) and result_obj.get("success") == False:
+                                    is_failed_result = True
+                                    logger.warning(f"  ⚠️  {tool_name} returned error: {result_obj.get('message', 'Unknown')}")
+                            except:
+                                pass  # Not JSON, treat as success
+                        
+                        # Only store successful results
+                        if not is_failed_result:
+                            tool_results[tool_name] = result
+                            logger.info(f"  ✓ {tool_name} completed")
+                        else:
+                            logger.info(f"  ✗ {tool_name} failed (error returned)")
+                    else:
+                        logger.warning(f"  ⚠️  {tool_name} returned None")
+                        
                 except Exception as e:
-                    logger.warning(f"  ❌ Tool {tool_name} failed: {e}")
+                    logger.error(f"  ✗ {tool_name} exception: {e}")
             
             state["tool_results"] = tool_results
+            
+            logger.info(f"Tool execution complete: {len(tool_results)}/{len(selected)} succeeded")
             
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_completed(
                     state["_step"],
-                    metadata={"tools_executed": len(tool_results)}
+                    metadata={"tools_executed": len(tool_results), "tools": list(tool_results.keys())}
                 )
             
-            logger.info(f"Tool execution complete: {len(tool_results)}/{len(selected)} tools succeeded")
-            logger.info(f"{separator} TOOL EXECUTION COMPLETE {separator}")
+            logger.info(separator)
         except Exception as e:
-            logger.error(f"Tool execution failed: {e}")
+            logger.error(f"✗ Tool execution failed: {e}")
             state["tool_results"] = {}
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_failed(state["_step"], str(e))
@@ -1282,6 +2198,12 @@ QUY TẮC TRẢ LỜI:
     async def node_format_output(self, state: WorkflowState) -> Dict[str, Any]:
         """Format final output with tables, calculations, and citations"""
         try:
+            separator = "═" * 80
+            logger.info("")
+            logger.info(separator)
+            logger.info("FORMAT OUTPUT NODE START")
+            logger.info(separator)
+            
             if self.observer:
                 state["_step"] = await self.observer.emit_step_started("FORMAT_OUTPUT")
             
@@ -1290,26 +2212,29 @@ QUY TẮC TRẢ LỜI:
             tool_results = state.get("tool_results")
             data_types = state.get("detected_data_types", [])
             
+            logger.info(f"Input data:")
+            logger.info(f"  Generated answer: {len(answer)} chars")
+            logger.info(f"  Search results: {len(search_results) if search_results else 0}")
+            logger.info(f"  Tool results: {len(tool_results) if tool_results else 0}")
+            logger.info(f"  Data types: {data_types if data_types else 'None'}")
+            
             formatted_answer = await self.formatter.format_answer(
                 answer, search_results, tool_results, data_types
             )
             
+            logger.info(f"Formatted answer: {len(formatted_answer)} chars")
             state["formatted_answer"] = formatted_answer
             
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_completed(
                     state["_step"],
-                    output_size=len(formatted_answer)
+                    output_size=len(formatted_answer),
+                    metadata={"answer_len": len(formatted_answer)}
                 )
             
-            # Workflow completion
-            if self.observer:
-                await self.observer.emit_workflow_completed()
-                self.observer.print_summary()
-            
-            logger.info(f"Output formatted ({len(formatted_answer)} chars)")
+            logger.info(separator)
         except Exception as e:
-            logger.error(f"Output formatting failed: {e}")
+            logger.error(f"✗ Output formatting failed: {e}")
             state["formatted_answer"] = state.get("generated_answer", "")
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_failed(state["_step"], str(e))
@@ -1368,6 +2293,11 @@ QUY TẮC TRẢ LỜI:
             final_state = await self.graph.ainvoke(state)
             
             logger.info(f"V4 workflow completed: answer_length={len(final_state.get('generated_answer', ''))}")
+            
+            # Print workflow summary at the very end
+            if self.observer:
+                await self.observer.emit_workflow_completed()
+                self.observer.print_summary()
             
             return final_state
             

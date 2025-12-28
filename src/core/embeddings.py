@@ -85,6 +85,10 @@ class SingleDenseEmbedding(EmbeddingStrategy):
         embedding = self.model.encode(text, convert_to_numpy=False)
         return embedding.tolist() if hasattr(embedding, 'tolist') else list(embedding)
     
+    def embed_query(self, query: str) -> List[float]:
+        """Embed a query string - alias for embed_single for compatibility"""
+        return self.embed_single(query)
+    
     @property
     def embedding_dimension(self) -> int:
         return self._dim

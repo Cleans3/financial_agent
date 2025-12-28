@@ -67,6 +67,9 @@ class WorkflowState(TypedDict):
     rewrite_context_type: Optional[str]     # "file_context" or "conversation_context"
     rewritten_prompt: Optional[str]         # Disambiguated query using context
     
+    # ===== QUERY REFORMULATION PHASE (QUERY_REFORMULATION node) =====
+    reformulated_query: Optional[str]       # Query combined with RAG results + tool results for LLM
+    
     # ===== FILE EXTRACTION PHASE (EXTRACT_DATA node) =====
     extracted_file_data: Optional[Dict]     # Structured data from files
     file_metadata: List[Dict]               # File metadata from extraction (path, name, type, size)
@@ -103,6 +106,12 @@ class WorkflowState(TypedDict):
     # ===== TOOL EXECUTION PHASE (EXECUTE_TOOLS node) =====
     tool_results: Dict[str, Any]            # Tool execution results {tool_name: result}
     combined_tool_output: str                # Formatted combined output from all tools
+    
+    # ===== SUMMARY TOOLS PHASE (SUMMARY_TOOLS node) =====
+    summary_applied: bool                   # Whether summary tool was applied
+    summary_was_executed: bool              # Explicit flag: summary tool executed
+    summary_result: Optional[Dict[str, Any]]    # Result from summary tool execution
+    summary_tool_selected: Optional[str]    # Which summary technique was selected
     
     # ===== OUTPUT FORMATTING PHASE (FORMAT_OUTPUT node) =====
     formatted_answer: str                   # Final formatted response with tables, calculations
@@ -151,6 +160,9 @@ def create_initial_state(
         rewrite_context_type=None,
         rewritten_prompt=None,
         
+        # Query Reformulation
+        reformulated_query=None,
+        
         # File Extraction
         extracted_file_data=None,
         file_metadata=[],
@@ -180,6 +192,12 @@ def create_initial_state(
         
         # Tool Selection
         selected_tools=[],
+        
+        # Summary Tools
+        summary_applied=False,
+        summary_was_executed=False,
+        summary_result=None,
+        summary_tool_selected=None,
         
         # Tool Execution
         tool_results={},

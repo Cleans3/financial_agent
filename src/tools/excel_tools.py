@@ -42,6 +42,107 @@ def load_excel_file(file_path: str) -> Dict[str, pd.DataFrame]:
         raise
 
 
+def detect_and_split_tables(df: pd.DataFrame, sheet_name: str = "") -> List[tuple]:
+    """
+    Detect multiple tables within a single sheet by finding empty row separators.
+    
+    A new table is detected when:
+    - There are 1+ consecutive completely empty rows (separator)
+    - Column structure changes significantly
+    - A header-like row appears (after empty rows)
+    
+    Args:
+        df: DataFrame from a sheet
+        sheet_name: Name of the sheet (for naming tables)
+        
+    Returns:
+        List of (table_df, table_name) tuples
+    """
+    try:
+        logger.info(f"Detecting tables in sheet: {sheet_name}")
+        
+        if df.empty:
+            return []
+        
+        # Get indices of completely empty rows
+        empty_row_indices = []
+        for idx, row in df.iterrows():
+            if row.isna().all():
+                empty_row_indices.append(idx)
+        
+        # If no empty rows, treat entire sheet as single table
+        if not empty_row_indices:
+            logger.info(f"No empty rows detected - treating sheet as single table")
+            return [(df, sheet_name)]
+        
+        # Find groups of consecutive empty rows (each group = separator)
+        table_separators = []
+        i = 0
+        while i < len(empty_row_indices):
+            group_start = empty_row_indices[i]
+            group_end = empty_row_indices[i]
+            
+            # Find consecutive empty rows
+            while i + 1 < len(empty_row_indices) and empty_row_indices[i + 1] == empty_row_indices[i] + 1:
+                i += 1
+                group_end = empty_row_indices[i]
+            
+            # Mark the end of the empty row group as separator
+            table_separators.append(group_end)
+            i += 1
+        
+        if not table_separators:
+            logger.info(f"No empty row separators found - treating as single table")
+            return [(df, sheet_name)]
+        
+        # Split dataframe by separators
+        tables = []
+        start_idx = 0
+        
+        for sep_idx in table_separators:
+            if sep_idx > start_idx:
+                # Extract table section (before the separator)
+                table_section = df.iloc[start_idx:sep_idx].copy()
+                table_section = clean_dataframe(table_section)
+                
+                if not table_section.empty:
+                    # Auto-generate table name
+                    table_num = len(tables) + 1
+                    table_name = f"{sheet_name} - Bảng {table_num}" if sheet_name else f"Bảng {table_num}"
+                    
+                    # Try to extract title from first row if it looks like a header
+                    first_row = table_section.iloc[0]
+                    if not any(pd.isna(first_row)):
+                        # First row has content - might be a title
+                        first_row_str = str(first_row.iloc[0])
+                        if len(first_row_str) > 5 and len(first_row_str) < 100:
+                            table_name = f"{sheet_name} - {first_row_str}" if sheet_name else first_row_str
+                            table_section = table_section.iloc[1:].reset_index(drop=True)
+                    
+                    tables.append((table_section, table_name))
+                    logger.info(f"  Detected table: {table_name} ({len(table_section)} rows)")
+            
+            # Skip past the separator (empty rows)
+            start_idx = sep_idx + 1
+        
+        # Add remaining data after last separator
+        if start_idx < len(df):
+            remaining = df.iloc[start_idx:].copy()
+            remaining = clean_dataframe(remaining)
+            if not remaining.empty:
+                table_num = len(tables) + 1
+                table_name = f"{sheet_name} - Bảng {table_num}" if sheet_name else f"Bảng {table_num}"
+                tables.append((remaining, table_name))
+                logger.info(f"  Detected table: {table_name} ({len(remaining)} rows)")
+        
+        logger.info(f"✓ Detected {len(tables)} tables in sheet")
+        return tables if tables else [(df, sheet_name)]
+        
+    except Exception as e:
+        logger.error(f"Error detecting tables: {e}")
+        return [(df, sheet_name)]
+
+
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Làm sạch DataFrame - loại bỏ hàng/cột trống, chuẩn hóa dữ liệu
@@ -254,21 +355,30 @@ def analyze_excel_to_markdown(file_path: str, max_rows_per_sheet: int = 200) -> 
                 logger.warning(f"Sheet '{sheet_name}' is empty, skipping")
                 continue
             
-            # Làm sạch dữ liệu
-            df_clean = clean_dataframe(df)
+            # DETECT AND SPLIT multiple tables within the sheet
+            tables_in_sheet = detect_and_split_tables(df, sheet_name)
             
-            # Xác định đơn vị dựa trên tên sheet
-            unit = "VNĐ"  # Mặc định
-            if "%" in sheet_name or "tỷ" in sheet_name.lower():
-                unit = "%"
-            elif "cổ phần" in sheet_name.lower() or "số lượng" in sheet_name.lower():
-                unit = "Cổ phần"
-            elif "giá" in sheet_name.lower():
-                unit = "VNĐ"
+            logger.info(f"Processing {len(tables_in_sheet)} table(s) from sheet '{sheet_name}'")
             
-            # Chuyển đổi sang Markdown với giới hạn hàng
-            markdown_sheet = dataframe_to_markdown(df_clean, title=f"Bảng: {sheet_name}", unit=unit, max_rows=max_rows_per_sheet)
-            markdown_output += markdown_sheet
+            for table_df, table_name in tables_in_sheet:
+                if table_df.empty:
+                    continue
+                
+                # Làm sạch dữ liệu
+                table_df = clean_dataframe(table_df)
+                
+                # Xác định đơn vị dựa trên tên sheet/table
+                unit = "VNĐ"  # Mặc định
+                if "%" in sheet_name or "tỷ" in sheet_name.lower():
+                    unit = "%"
+                elif "cổ phần" in sheet_name.lower() or "số lượng" in sheet_name.lower():
+                    unit = "Cổ phần"
+                elif "giá" in sheet_name.lower():
+                    unit = "VNĐ"
+                
+                # Chuyển đổi sang Markdown với giới hạn hàng
+                markdown_table = dataframe_to_markdown(table_df, title=table_name, unit=unit, max_rows=max_rows_per_sheet)
+                markdown_output += markdown_table
         
         logger.info(f"✓ Analysis completed")
         

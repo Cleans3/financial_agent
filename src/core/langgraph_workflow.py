@@ -21,6 +21,8 @@ from langgraph.prebuilt import ToolNode
 from langchain_core.messages import HumanMessage, AIMessage
 
 from .workflow_state import WorkflowState, create_initial_state
+from ..services.advanced_retrieval_service import AdvancedRetrievalService
+from ..services.summary_tool_router import SummaryToolRouter
 
 logger = logging.getLogger(__name__)
 
@@ -47,21 +49,37 @@ class LangGraphWorkflow:
             agent_executor: FinancialAgent instance with tools, LLM, etc.
         """
         self.agent = agent_executor
+        
+        # Initialize RAG service to get qdrant manager
+        from ..services.multi_collection_rag_service import get_rag_service
+        rag_service = get_rag_service()
+        
+        # Initialize advanced retrieval with qdrant manager
+        self.advanced_retrieval = AdvancedRetrievalService(qdrant_manager=rag_service.qd_manager)
+        self.summary_tool_router = SummaryToolRouter()
         self.graph = self._build_graph()
-        logger.info("LangGraphWorkflow initialized with simplified agent-centric architecture")
+        logger.info("LangGraphWorkflow initialized with advanced retrieval and summarization services")
+        logger.info("[WORKFLOW:INIT] ✓ Advanced retrieval service ready")
+        logger.info("[WORKFLOW:INIT] ✓ Summary tool router ready")
     
     def _build_graph(self) -> StateGraph:
         """
-        Build the enhanced workflow with file processing.
+        Build the enhanced workflow with file processing, advanced retrieval, and summarization.
         
         Flow:
-        EXTRACT_DATA → INGEST_FILE → AGENT → (TOOLS) → AGENT → END
+        EXTRACT_DATA → INGEST_FILE → RETRIEVE → SUMMARY_TOOLS → AGENT → (TOOLS) → AGENT → END
         """
         workflow = StateGraph(WorkflowState)
         
         # Add file processing nodes
         workflow.add_node("extract_data", self.node_extract_data)
         workflow.add_node("ingest_file", self.node_ingest_file)
+        
+        # Add retrieval node with advanced retrieval
+        workflow.add_node("retrieve", self.node_retrieve)
+        
+        # Add summary tools node
+        workflow.add_node("summary_tools", self.node_summary_tools)
         
         # Add core agent nodes
         workflow.add_node("agent", self.node_agent)
@@ -72,7 +90,13 @@ class LangGraphWorkflow:
         
         # File processing flow
         workflow.add_edge("extract_data", "ingest_file")
-        workflow.add_edge("ingest_file", "agent")
+        workflow.add_edge("ingest_file", "retrieve")
+        
+        # Retrieval to summary tools
+        workflow.add_edge("retrieve", "summary_tools")
+        
+        # Summary tools to agent
+        workflow.add_edge("summary_tools", "agent")
         
         # Agent conditional flow: if tools selected → tools node, else → END
         workflow.add_conditional_edges(
@@ -313,6 +337,161 @@ class LangGraphWorkflow:
                 }
             }
     
+    # ========== RETRIEVAL NODE ==========
+    
+    async def node_retrieve(self, state: WorkflowState) -> Dict[str, Any]:
+        """
+        RETRIEVE node: Advanced RAG retrieval with RRF and deduplication.
+        
+        Uses AdvancedRetrievalService to:
+        1. Classify query type (SUMMARY, COMPARATIVE, ANOMALY, etc.)
+        2. Retrieve both structural and metric-centric chunks
+        3. Apply RRF (Reciprocal Rank Fusion) to combine results
+        4. Deduplicate metric chunks by structural chunk ID
+        5. Return ranked, deduplicated results with confidence scores
+        """
+        logger.info("="*30)
+        logger.info(">>> RETRIEVE NODE")
+        logger.info("="*30)
+        
+        user_prompt = state.get("user_prompt", "")
+        user_id = state.get("user_id", "default")
+        session_id = state.get("session_id", "default")
+        use_rag = state.get("use_rag", True)
+        
+        logger.info(f"Query: {user_prompt[:100]}...")
+        logger.info(f"User: {user_id}, Session: {session_id}")
+        logger.info(f"RAG Enabled: {use_rag}")
+        
+        # If RAG is disabled, skip retrieval
+        if not use_rag:
+            logger.info("⚠️  RAG disabled - skipping retrieval")
+            return {
+                "best_search_results": [],
+                "retrieval_metadata": {
+                    "query_type": "UNKNOWN",
+                    "structural_count": 0,
+                    "metric_count": 0,
+                    "total_count": 0,
+                    "deduped_count": 0,
+                    "rag_enabled": False
+                }
+            }
+        
+        try:
+            logger.info("[RETRIEVE:START] Beginning advanced retrieval...")
+            
+            # Generate query embedding
+            from ..core.embeddings import get_embedding_strategy
+            embedding_strategy = get_embedding_strategy()
+            query_embedding = embedding_strategy.embed_query(user_prompt)
+            
+            # Call advanced retrieval service
+            results = self.advanced_retrieval.retrieve(
+                user_id=user_id,
+                query=user_prompt,
+                query_embedding=query_embedding,
+                chat_session_id=session_id,
+                limit=10  # Get top 10 results
+            )
+            
+            logger.info(f"[RETRIEVE:SUCCESS] Retrieved {len(results)} documents")
+            
+            # Log retrieval stats
+            if results:
+                logger.info(f"  • Query classified as: {results[0].get('query_type', 'UNKNOWN')}")
+                logger.info(f"  • Top result similarity: {results[0].get('score', 0):.1%}")
+                logger.info(f"  • Chunk types present: {set(r.get('chunk_type', 'unknown') for r in results)}")
+            
+            return {
+                "best_search_results": results,
+                "retrieval_metadata": {
+                    "query_type": results[0].get('query_type', 'UNKNOWN') if results else "UNKNOWN",
+                    "total_count": len(results),
+                    "rag_enabled": True
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"[RETRIEVE:ERROR] Advanced retrieval failed: {e}")
+            logger.warning("[RETRIEVE:FALLBACK] Proceeding without RAG context")
+            import traceback
+            traceback.print_exc()
+            
+            return {
+                "best_search_results": [],
+                "retrieval_metadata": {
+                    "error": str(e),
+                    "rag_enabled": True,
+                    "fallback_used": True
+                }
+            }
+    
+    # ========== SUMMARY TOOLS NODE ==========
+    
+    async def node_summary_tools(self, state: WorkflowState) -> Dict[str, Any]:
+        """
+        SUMMARY_TOOLS node: Apply advanced summarization techniques to retrieved chunks.
+        
+        Uses SummaryToolRouter to:
+        1. Check if query requires summarization
+        2. Select appropriate summarization technique
+        3. Apply technique to retrieved chunks
+        4. Format for agent input
+        
+        Returns enhanced chunks with summaries if applicable.
+        """
+        logger.info("="*30)
+        logger.info(">>> SUMMARY_TOOLS NODE")
+        logger.info("="*30)
+        
+        user_prompt = state.get("user_prompt", "")
+        retrieved_chunks = state.get("best_search_results", [])
+        
+        logger.info(f"Query: {user_prompt[:100]}...")
+        logger.info(f"Retrieved chunks: {len(retrieved_chunks)}")
+        
+        if not retrieved_chunks:
+            logger.info("⚠️  No chunks to summarize - skipping")
+            return {
+                "summary_applied": False,
+                "summary_result": None
+            }
+        
+        try:
+            logger.info("[SUMMARY:START] Evaluating summarization suitability...")
+            
+            # Route query to determine if/what summarization is needed
+            summary_applied, summary_result, formatted_chunks = self.summary_tool_router.route(
+                query=user_prompt,
+                retrieved_chunks=retrieved_chunks
+            )
+            
+            if summary_applied:
+                logger.info(f"[SUMMARY:APPLIED] Technique: {summary_result.get('technique', 'UNKNOWN')}")
+                logger.info(f"[SUMMARY:LENGTH] Original: {summary_result.get('original_length', 0)} chars")
+                logger.info(f"[SUMMARY:LENGTH] Summary: {len(summary_result.get('summary', ''))} chars")
+                logger.info(f"[SUMMARY:METRICS] Confidence: {summary_result.get('confidence_score', 0):.1%}")
+            else:
+                logger.info("[SUMMARY:SKIPPED] Query doesn't require summarization")
+            
+            return {
+                "summary_applied": summary_applied,
+                "summary_result": summary_result if summary_applied else None
+            }
+            
+        except Exception as e:
+            logger.error(f"[SUMMARY:ERROR] Summarization failed: {e}")
+            logger.warning("[SUMMARY:FALLBACK] Proceeding with retrieved chunks as-is")
+            import traceback
+            traceback.print_exc()
+            
+            return {
+                "summary_applied": False,
+                "summary_result": None,
+                "summarization_error": str(e)
+            }
+    
     # ========== ROUTING FUNCTION ==========
     
     def _route_after_agent(self, state: WorkflowState) -> str:
@@ -417,8 +596,17 @@ Hướng dẫn:
 - Sử dụng tiếng Việt trừ khi người dùng yêu cầu ngôn ngữ khác
 """
             
-            # Add RAG context if available
-            if rag_context:
+            # Add summary or RAG context
+            summary_applied = state.get("summary_applied", False)
+            summary_result = state.get("summary_result")
+            
+            if summary_applied and summary_result:
+                # Use summary as context
+                logger.info(f"    📊 Using summary context (technique: {summary_result.get('technique', 'UNKNOWN')})")
+                system_text += f"\n📋 Tài liệu đã được tổng hợp:\n"
+                system_text += summary_result.get('summary', '')
+            elif rag_context:
+                # Use raw RAG context
                 system_text += "\n📚 Tài liệu liên quan:\n"
                 for i, doc in enumerate(rag_context[:5], 1):
                     title = doc.get('title', 'Unknown')

@@ -80,6 +80,29 @@ class PromptClassifier:
         """
         prompt_lower = prompt.lower().strip()
         
+        # === FINANCIAL QUERY DETECTION ===
+        # Stock symbols + technical indicators = financial query (REQUEST)
+        # Vietnamese stock tickers: VCB, TCB, VIC, VNM, HPG, FPT, BID, CTG, etc.
+        # Technical indicators: RSI, MACD, SMA, EMA, Bollinger, Stochastic, etc.
+        stock_symbols = [
+            "vcb", "tcb", "vic", "vnm", "hpg", "fpt", "bid", "ctg", "gas", "vcg",
+            "vpi", "sse", "hsg", "pvh", "nrl", "psh", "ore", "dpm", "ndc", "csm",
+            "pvi", "kpc", "ptt", "mbb", "acb", "vib", "scb", "eib", "tpb", "bvh",
+            "hnr", "pvx", "hnx", "hut", "msn", "khh", "pks", "pha", "phc", "phg"
+        ]
+        technical_indicators = [
+            "rsi", "macd", "sma", "ema", "bollinger", "stochastic", "roc", "obv",
+            "atr", "adx", "williams", "fibonacci", "keltner", "ichimoku",
+            "moving average", "momentum", "oscillator"
+        ]
+        
+        has_symbol = any(symbol in prompt_lower for symbol in stock_symbols)
+        has_indicator = any(indicator in prompt_lower for indicator in technical_indicators)
+        
+        if has_symbol or has_indicator:
+            self.logger.debug(f"Detected financial query: stock_symbol={has_symbol}, indicator={has_indicator}")
+            return PromptType.REQUEST
+        
         # === CHITCHAT DETECTION ===
         # Greetings and small talk
         greetings = [

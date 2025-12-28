@@ -60,47 +60,92 @@ class ResultFilter:
         global_semantic = global_semantic or []
         global_keyword = global_keyword or []
         
+        separator = "|" * 25
+        self.logger.info(f"{separator} FILTER START {separator}")
+        
+        # Log input details with character counts
+        input_sources = [
+            ('personal_semantic', personal_semantic),
+            ('personal_keyword', personal_keyword),
+            ('global_semantic', global_semantic),
+            ('global_keyword', global_keyword),
+        ]
+        
+        total_input_chars = 0
+        for source_name, results in input_sources:
+            source_char_count = sum(
+                len(r.get('text', '') or r.get('content', ''))
+                for r in results
+            )
+            total_input_chars += source_char_count
+            self.logger.info(
+                f"📥 {source_name}: {len(results)} results, {source_char_count:,} chars"
+            )
+        
         self.logger.info(
-            f"Filtering: {len(personal_semantic)} personal_semantic, "
-            f"{len(personal_keyword)} personal_keyword, "
-            f"{len(global_semantic)} global_semantic, "
-            f"{len(global_keyword)} global_keyword"
+            f"📊 Total input: {len(personal_semantic) + len(personal_keyword) + len(global_semantic) + len(global_keyword)} results, "
+            f"{total_input_chars:,} total chars"
         )
         
         # Step 1: Assign rankings and calculate RRF scores
+        self.logger.info("📍 STEP 1: CALCULATE RRF SCORES")
         ranked_results = self._calculate_rrf_scores(
             personal_semantic, personal_keyword,
             global_semantic, global_keyword
         )
+        self.logger.info(f"✅ RRF calculated: {len(ranked_results)} unique document IDs")
         
         # Step 2: Deduplicate by document ID
+        self.logger.info("📍 STEP 2: DEDUPLICATE RESULTS")
         deduplicated = self._deduplicate_results(ranked_results)
-        self.logger.info(f"After deduplication: {len(deduplicated)} unique results")
+        self.logger.info(f"✅ After deduplication: {len(deduplicated)} results")
         
         # Step 3: Sort by RRF score (descending)
+        self.logger.info("📍 STEP 3: SORT BY RRF SCORE")
         sorted_results = sorted(
             deduplicated,
             key=lambda x: x['rrf_score'],
             reverse=True
         )
+        self.logger.info(f"✅ Sorted by RRF score (descending)")
         
         # Step 4: Filter by threshold and limit to max results
+        self.logger.info(f"📍 STEP 4: APPLY THRESHOLD & LIMIT")
+        self.logger.info(f"   Score threshold: {self.score_threshold}")
+        self.logger.info(f"   Max results: {self.max_results}")
+        
         filtered_results = [
             r for r in sorted_results
             if r['rrf_score'] >= self.score_threshold
         ][:self.max_results]
         
+        # Calculate total output characters
+        output_char_count = sum(
+            len(r.get('text', '') or r.get('content', ''))
+            for r in filtered_results
+        )
+        output_byte_count = output_char_count * 2
+        
         self.logger.info(
-            f"Final ranked results: {len(filtered_results)} results "
-            f"(threshold: {self.score_threshold}, max: {self.max_results})"
+            f"✅ Final results: {len(filtered_results)} results, "
+            f"{output_char_count:,} chars (~{output_byte_count:,} bytes)"
         )
         
-        # Log ranking info
+        # Log detailed ranking info
+        self.logger.info("\n📊 FINAL RANKED RESULTS:")
         for i, result in enumerate(filtered_results, 1):
-            self.logger.debug(
-                f"  {i}. [{result['rrf_score']:.4f}] {result.get('source', 'unknown')} "
-                f"({result.get('retrieval_source', 'unknown')})"
+            content = result.get('text', '') or result.get('content', '')
+            content_len = len(content)
+            source = result.get('source', 'unknown')
+            retrieval_source = result.get('retrieval_source', 'unknown')
+            sources_found = ', '.join(result.get('sources_found_in', []))
+            
+            self.logger.info(
+                f"  {i}. RRF={result['rrf_score']:.4f} | {content_len:,} chars | "
+                f"{source} | {retrieval_source} | sources: [{sources_found}]"
             )
+        
+        self.logger.info(f"{separator} FILTER COMPLETE {separator}\n")
         
         return filtered_results
     
@@ -115,6 +160,7 @@ class ResultFilter:
         RRF formula: score = sum(1 / (rank + k))
         - rank: position in sorted list (0-indexed)
         - k: constant (60 default for LLMs)
+        - weight: personal results weighted higher (2.0x)
         
         Args:
             Four lists of search results
@@ -122,6 +168,8 @@ class ResultFilter:
         Returns:
             Combined list with 'rrf_score' field added to each result
         """
+        self.logger.debug(f"   RRF parameters: k={self.k}, personal_weight={self.personal_weight}")
+        
         # Dictionary to track scores for each document
         scores_by_doc = defaultdict(lambda: {'rrf_score': 0.0, 'result': None, 'sources': []})
         
@@ -134,6 +182,8 @@ class ResultFilter:
         ]
         
         for list_name, results, weight in ranking_lists:
+            self.logger.debug(f"   Processing {list_name} (weight={weight}x): {len(results)} results")
+            
             for rank, result in enumerate(results):
                 # Calculate RRF component: weight * (1 / (rank + k))
                 rrf_component = weight * (1.0 / (rank + self.k))
@@ -141,15 +191,20 @@ class ResultFilter:
                 # Use result ID as primary key for deduplication
                 # This preserves different chunks from same file (they have different IDs)
                 doc_id = result.get('id')
+                if doc_id is not None:
+                    doc_id = str(doc_id)  # Ensure it's a string (point IDs are ints)
                 if not doc_id:
                     # Fallback to point_id if available
                     doc_id = result.get('point_id')
+                    if doc_id is not None:
+                        doc_id = str(doc_id)  # Ensure it's a string
                 if not doc_id:
                     # Last resort: create unique key from source + metadata to avoid collisions
                     # This ensures each result is treated as unique
                     source = result.get('source', '')
                     title = result.get('title', '')
-                    text_hash = abs(hash(result.get('text', result.get('content', ''))[:100])) % 1000000
+                    text_content = result.get('text', '') or result.get('content', '')
+                    text_hash = abs(hash(text_content[:100])) % 1000000
                     doc_id = f"{source}_{title}_{text_hash}_{rank}".replace(' ', '_')
                 
                 # Update total score
@@ -158,6 +213,18 @@ class ResultFilter:
                 # Store first encountered result (will merge metadata)
                 if scores_by_doc[doc_id]['result'] is None:
                     scores_by_doc[doc_id]['result'] = result.copy()
+                    # Log first encounter of this document
+                    content_len = len(result.get('text', '') or result.get('content', ''))
+                    self.logger.debug(
+                        f"     [new] rank={rank}, doc_id={doc_id[:50]}..., "
+                        f"rrf_component={rrf_component:.4f}, content={content_len} chars"
+                    )
+                else:
+                    # This doc was already seen from another source
+                    self.logger.debug(
+                        f"     [dup] rank={rank}, doc_id={doc_id[:50]}..., "
+                        f"adding rrf_component={rrf_component:.4f} (new total={scores_by_doc[doc_id]['rrf_score']:.4f})"
+                    )
                 
                 # Track which sources this result came from
                 scores_by_doc[doc_id]['sources'].append(list_name)
@@ -189,25 +256,82 @@ class ResultFilter:
         Returns:
             Deduplicated list
         """
-        seen = {}
+        self.logger.info(f"   🔍 DEDUPLICATION CHECK: Input {len(results)} results")
+        self.logger.info(f"   (Checking document IDs to find true duplicates)")
         
-        for result in results:
+        seen = {}
+        duplicates_found = {}
+        detailed_decisions = []
+        
+        for idx, result in enumerate(results, 1):
             # Use document/point ID as key - this is unique per chunk
             doc_id = result.get('id') or result.get('point_id')
+            if doc_id is not None:
+                doc_id = str(doc_id)  # Ensure it's a string (point IDs are ints)
             if not doc_id:
                 # If no ID, this is from a different source - don't deduplicate it
                 # Generate a stable key from the generated ID we created earlier
                 doc_id = f"{result.get('source', '')}_{result.get('title', '')}"
             
+            content_len = len(result.get('text', '') or result.get('content', ''))
+            rrf_score = result.get('rrf_score', 0)
+            sources_found = ', '.join(result.get('sources_found_in', []))
+            
             # Keep highest scoring version
-            if doc_id not in seen or result['rrf_score'] > seen[doc_id]['rrf_score']:
+            if doc_id not in seen:
                 seen[doc_id] = result
+                decision = f"     ✅ [KEEP-NEW] #{idx} doc_id={doc_id[:45]}... | RRF={rrf_score:.4f} | {content_len} chars | sources=[{sources_found}]"
+                self.logger.info(decision)
+                detailed_decisions.append(decision)
+            else:
+                # This is a duplicate
+                old_score = seen[doc_id]['rrf_score']
+                new_score = rrf_score
+                old_content_len = len(seen[doc_id].get('text', '') or seen[doc_id].get('content', ''))
+                
+                if new_score > old_score:
+                    decision = (
+                        f"     🔄 [REPLACE] #{idx} doc_id={doc_id[:45]}...\n"
+                        f"        OLD: RRF={old_score:.4f} | {old_content_len} chars | "
+                        f"sources=[{', '.join(seen[doc_id].get('sources_found_in', []))}]\n"
+                        f"        NEW: RRF={new_score:.4f} | {content_len} chars | "
+                        f"sources=[{sources_found}]\n"
+                        f"        REASON: New RRF score ({new_score:.4f}) is HIGHER than old ({old_score:.4f})"
+                    )
+                    self.logger.info(decision)
+                    detailed_decisions.append(decision)
+                    seen[doc_id] = result
+                else:
+                    decision = (
+                        f"     ❌ [DELETE] #{idx} doc_id={doc_id[:45]}...\n"
+                        f"        OLD: RRF={old_score:.4f} | {old_content_len} chars | "
+                        f"sources=[{', '.join(seen[doc_id].get('sources_found_in', []))}]\n"
+                        f"        NEW: RRF={new_score:.4f} | {content_len} chars | "
+                        f"sources=[{sources_found}]\n"
+                        f"        REASON: Old RRF score ({old_score:.4f}) is EQUAL-OR-HIGHER, keeping first occurrence"
+                    )
+                    self.logger.info(decision)
+                    detailed_decisions.append(decision)
+                
+                if doc_id not in duplicates_found:
+                    duplicates_found[doc_id] = 1
+                else:
+                    duplicates_found[doc_id] += 1
         
         deduplicated = list(seen.values())
         removed_count = len(results) - len(deduplicated)
         
+        self.logger.info(f"")
+        self.logger.info(f"   📊 DEDUPLICATION RESULT:")
+        self.logger.info(f"     Input: {len(results)} results")
+        self.logger.info(f"     Output: {len(deduplicated)} results")
         if removed_count > 0:
-            self.logger.info(f"Deduplication removed {removed_count} duplicate results")
+            self.logger.info(
+                f"     Deleted: {removed_count} duplicates "
+                f"(found {len(duplicates_found)} doc IDs with duplicates)"
+            )
+        else:
+            self.logger.info(f"     Deleted: 0 (no duplicates found - all results have unique doc IDs)")
         
         return deduplicated
     

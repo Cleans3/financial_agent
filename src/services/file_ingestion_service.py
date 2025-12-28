@@ -24,6 +24,7 @@ class FileIngestionService:
     ) -> Tuple[bool, Dict[str, Any]]:
         """
         Ingest file into RAG system using FileProcessingPipeline.
+        Includes retry logic for timeout errors via RAGService.
         
         Returns: (success, result_dict)
             result_dict contains: text, chunks_added, summary, error, processing_time
@@ -39,15 +40,27 @@ class FileIngestionService:
                 logger.error(f"Pipeline processing failed: {error}")
                 return False, {"error": error}
             
-            # Step 2: Ingest to RAG
+            # Step 2: Ingest to RAG (with built-in retry logic for timeouts)
             logger.info(f"[RAG] Ingesting {len(document.chunks)} chunks to Qdrant...")
-            chunks_added, summary = self.rag_service.add_document(
-                user_id=user_id,
-                chat_session_id=chat_session_id,
-                text=document.extracted_text,
-                title=document.title,
-                source=document.filename
-            )
+            try:
+                chunks_added, summary = self.rag_service.add_document(
+                    user_id=user_id,
+                    chat_session_id=chat_session_id,
+                    text=document.extracted_text,
+                    title=document.title,
+                    source=document.filename
+                )
+            except Exception as qdrant_error:
+                error_str = str(qdrant_error).lower()
+                if "timeout" in error_str or "timed out" in error_str:
+                    logger.error(
+                        f"Qdrant timeout during ingestion: {qdrant_error}. "
+                        f"The operation may still complete on the server. "
+                        f"Please retry or check Qdrant status."
+                    )
+                else:
+                    logger.error(f"RAG ingestion error: {qdrant_error}")
+                raise
             
             if chunks_added == 0:
                 logger.error("Failed to ingest document to RAG")

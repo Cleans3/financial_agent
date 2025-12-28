@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { Send, Loader2, User, Bot, Plus, X, File, Image, FileText, FileSpreadsheet, FileArchive, BookOpen } from "lucide-react";
 import axios from "axios";
 import MessageBubble from "./MessageBubble";
+import ThinkingSteps from "./ThinkingSteps";
 import DocumentPanel from "./DocumentPanel";
 import { conversationService } from "../services/conversationService";
 
@@ -119,6 +120,7 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh,
       const decoder = new TextDecoder();
       let finalAnswer = "";
       let collectedSteps = [];
+      let workflowSteps = [];  // NEW: Collect workflow steps separately
 
       while (true) {
         const { done, value } = await reader.read();
@@ -132,15 +134,17 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh,
             try {
               const data = JSON.parse(line.slice(6));
               
-              if (data.type === "rag_status") {
-                const ragStep = {
-                  step: 0,
-                  title: data.used ? "🗂️ RAG Retrieval" : "🗂️ RAG Check",
-                  description: data.used ? "Searching documents..." : "Checking if retrieval needed...",
-                  result: data.used ? `Retrieved ${data.count} documents` : "Using knowledge base",
-                };
-                collectedSteps.push(ragStep);
-                setThinkingSteps((prev) => [...prev, ragStep]);
+              // NEW: Handle workflow steps (high-detail phase tracking)
+              if (data.type === "workflow_step") {
+                const workflowStep = data.step;
+                workflowSteps.push(workflowStep);
+                setThinkingSteps((prev) => [...prev, workflowStep]);
+                // Log for debugging
+                console.debug(`[Workflow] ${workflowStep.id || 'unknown'} - ${workflowStep.status}`);
+              }
+              else if (data.type === "rag_status") {
+                // Skip RAG status - now handled by workflow steps
+                console.debug(`[RAG] ${data.used ? 'Enabled' : 'Disabled'}`);
               } 
               else if (data.type === "thinking_step") {
                 collectedSteps.push(data.step);
@@ -148,12 +152,18 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh,
               } 
               else if (data.type === "answer") {
                 finalAnswer = data.content;
+                // NEW: Collect workflow steps from answer data if present
+                if (data.workflow_steps && Array.isArray(data.workflow_steps)) {
+                  workflowSteps = data.workflow_steps;
+                  console.debug(`[Answer] Received ${workflowSteps.length} workflow steps`);
+                }
               } 
               else if (data.type === "error") {
                 throw new Error(data.message);
               }
             } catch (e) {
               // Skip parsing errors
+              console.debug("Skipped parsing error:", e.message);
             }
           }
         }
@@ -165,7 +175,7 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh,
           {
             role: "assistant",
             content: finalAnswer,
-            thinkingSteps: collectedSteps,
+            thinkingSteps: workflowSteps.length > 0 ? workflowSteps : collectedSteps,  // Use workflow steps if available
           },
         ]);
       }
@@ -495,24 +505,10 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh,
                   <span className="text-sm">Đang suy nghĩ...</span>
                 </div>
                 
-                {/* Show thinking steps while loading */}
+                {/* Show thinking steps while loading - Use ThinkingSteps component directly */}
                 {thinkingSteps.length > 0 && (
-                  <div className="space-y-2 text-xs">
-                    {thinkingSteps.map((step, idx) => (
-                      <div key={idx} className={`bg-slate-900/50 rounded p-2 border transition-all ${
-                        step.title?.includes("RAG") ? "border-emerald-600/50" : "border-slate-600"
-                      }`}>
-                        <div className="font-semibold text-cyan-300">{step.title}</div>
-                        <div className="text-slate-400 text-xs mt-1">{step.description}</div>
-                        {step.result && (
-                          <div className={`text-xs mt-1 ${
-                            step.title?.includes("RAG") ? "text-emerald-300" : "text-emerald-400"
-                          }`}>
-                            ✓ {step.result}
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                  <div className="mt-3">
+                    <ThinkingSteps steps={thinkingSteps} isCollapsed={false} />
                   </div>
                 )}
               </div>

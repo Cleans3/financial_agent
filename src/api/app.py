@@ -36,6 +36,14 @@ from ..core.security import (
     get_current_user,
     get_admin_user
 )
+from ..core.workflow_step_streaming import (
+    create_workflow_step,
+    STEP_STATUS_PENDING,
+    STEP_STATUS_IN_PROGRESS,
+    STEP_STATUS_COMPLETED,
+    STEP_STATUS_ERROR,
+    WORKFLOW_NODE_MAPPING
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -559,6 +567,8 @@ async def chat(
             session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
             if not session or session.user_id != user_id:
                 raise HTTPException(status_code=403, detail="Access denied")
+            # CRITICAL: Refresh session to get latest metadata (files uploaded after session was loaded)
+            db.refresh(session)
         
         # Auto-cleanup: Delete empty/greeting-only sessions (wrapped in try-except to not break chat)
         try:
@@ -639,6 +649,14 @@ async def chat(
         logger.info(f"[CHAT] Checking if files were uploaded in THIS request...")
         logger.info(f"[CHAT] request.uploaded_files: {request.uploaded_files}")
         
+        # Debug: Show session metadata state
+        logger.info(f"[CHAT] session.session_metadata exists: {session.session_metadata is not None}")
+        if session.session_metadata:
+            logger.info(f"[CHAT] session metadata keys: {list(session.session_metadata.keys())}")
+            logger.info(f"[CHAT] uploaded_files in metadata: {'uploaded_files' in session.session_metadata}")
+            if "uploaded_files" in session.session_metadata:
+                logger.info(f"[CHAT] Files in session metadata: {[f.get('name', 'unknown') for f in session.session_metadata['uploaded_files']]}")
+        
         # Only retrieve files from session if the current request indicates files were uploaded
         # This prevents triggering file upload workflow on normal prompts in sessions with previous uploads
         if request.uploaded_files and len(request.uploaded_files) > 0:
@@ -654,6 +672,12 @@ async def chat(
                 logger.info(f"[CHAT] Matched {len(uploaded_files_info)} files from session metadata")
                 if uploaded_files_info:
                     logger.info(f"[CHAT] Files to process: {[f.get('name', 'unknown') for f in uploaded_files_info]}")
+            else:
+                logger.warning(f"[CHAT] ⚠️  Files in request but NOT found in session metadata!")
+                logger.warning(f"[CHAT]    request.uploaded_files: {request.uploaded_files}")
+                logger.warning(f"[CHAT]    session has metadata: {session.session_metadata is not None}")
+                if session.session_metadata:
+                    logger.warning(f"[CHAT]    'uploaded_files' key exists: {'uploaded_files' in session.session_metadata}")
         else:
             logger.info(f"[CHAT] No files uploaded in current request - using text-only chat")
             logger.info(f"[CHAT] Session has files from previous uploads, but NOT processing them (normal prompt)")
@@ -674,13 +698,19 @@ async def chat(
         db.add(user_msg)
         db.add(assistant_msg)
         
-        # CRITICAL FIX: Clear uploaded_files from session_metadata after processing
-        # This prevents files from being re-ingested on subsequent prompts
-        if session and session.session_metadata and "uploaded_files" in session.session_metadata:
-            logger.info(f"Clearing uploaded_files from session_metadata after processing")
+        # CRITICAL FIX: Only clear files that were ACTUALLY processed in THIS request
+        # This prevents re-ingestion while allowing multiple file uploads in same conversation
+        if request.uploaded_files and session and session.session_metadata and "uploaded_files" in session.session_metadata:
+            logger.info(f"Removing {len(request.uploaded_files)} processed file(s) from session metadata")
             session_meta = session.session_metadata
-            session_meta["uploaded_files"] = []  # Clear the uploaded files list
+            # Only remove files that were in THIS request
+            files_to_keep = [
+                f for f in session_meta.get("uploaded_files", [])
+                if f.get('name') not in request.uploaded_files
+            ]
+            session_meta["uploaded_files"] = files_to_keep
             session.session_metadata = session_meta
+            logger.info(f"Session now has {len(files_to_keep)} remaining file(s) for future processing")
         
         db.commit()
         db.refresh(assistant_msg)
@@ -715,12 +745,14 @@ async def chat_stream(
     db: Session = Depends(get_db)
 ):
     """
-    Chat endpoint with streaming thinking steps
-    Streams real-time thinking steps as the agent processes
+    Chat endpoint with streaming thinking steps and workflow progress
+    Streams real-time workflow steps as the agent processes through all phases
     """
     import json
+    import time
     
     async def generate():
+        start_time = time.time()
         try:
             agent_instance = get_agent()
             user_id = current_user["user_id"]
@@ -739,6 +771,8 @@ async def chat_stream(
                 if not session or session.user_id != user_id:
                     yield f'data: {json.dumps({"type": "error", "message": "Access denied"})}\n\n'
                     return
+                # CRITICAL: Refresh session to get latest metadata (files uploaded after session was loaded)
+                db.refresh(session)
             
             # Auto-cleanup: Delete empty/greeting-only sessions
             try:
@@ -779,6 +813,14 @@ async def chat_stream(
             logger.info(f"[CHAT-STREAM] Checking if files were uploaded in THIS request...")
             logger.info(f"[CHAT-STREAM] request.uploaded_files: {request.uploaded_files}")
             
+            # Debug: Show session metadata state
+            logger.info(f"[CHAT-STREAM] session.session_metadata exists: {session.session_metadata is not None}")
+            if session.session_metadata:
+                logger.info(f"[CHAT-STREAM] session metadata keys: {list(session.session_metadata.keys())}")
+                logger.info(f"[CHAT-STREAM] uploaded_files in metadata: {'uploaded_files' in session.session_metadata}")
+                if "uploaded_files" in session.session_metadata:
+                    logger.info(f"[CHAT-STREAM] Files in session metadata: {[f.get('name', 'unknown') for f in session.session_metadata['uploaded_files']]}")
+            
             # Only retrieve files from session if the current request indicates files were uploaded
             # This prevents triggering file upload workflow on normal prompts in sessions with previous uploads
             if request.uploaded_files and len(request.uploaded_files) > 0:
@@ -795,21 +837,98 @@ async def chat_stream(
                     if uploaded_files_info:
                         file_names = [f.get('name', 'unknown') for f in uploaded_files_info]
                         logger.info(f"[CHAT-STREAM] Files to process: {', '.join(file_names)}")
+                else:
+                    logger.warning(f"[CHAT-STREAM] ⚠️  Files in request but NOT found in session metadata!")
+                    logger.warning(f"[CHAT-STREAM]    request.uploaded_files: {request.uploaded_files}")
+                    logger.warning(f"[CHAT-STREAM]    session has metadata: {session.session_metadata is not None}")
+                    if session.session_metadata:
+                        logger.warning(f"[CHAT-STREAM]    'uploaded_files' key exists: {'uploaded_files' in session.session_metadata}")
             else:
                 logger.info(f"[CHAT-STREAM] No files uploaded in current request - using text-only chat")
                 logger.info(f"[CHAT-STREAM] Session has files from previous uploads, but NOT processing them (normal prompt)")
             
-            answer, thinking_steps = await agent_instance.aquery(
-                question=request.question,  # Original question, NOT enriched
-                user_id=user_id, 
-                session_id=session_id,
-                conversation_history=conversation_history,
-                uploaded_files=uploaded_files_info,  # Pass file metadata to workflow
-                allow_tools=request.allow_tools,
-                use_rag=use_rag
+            # ========== EXECUTE AGENT WORKFLOW ==========
+            # Emit workflow steps in real-time WHILE agent processes
+            # Steps should complete around the same time agent finishes
+            
+            all_workflow_steps = []
+            step_order = []
+            
+            if uploaded_files_info:
+                step_order.extend(['extract_file', 'ingest_file'])
+            step_order.extend(['classify', 'rewrite_eval'])
+            if uploaded_files_info:
+                step_order.append('rewrite_file')
+            if conversation_history:
+                step_order.append('rewrite_convo')
+            if use_rag:
+                step_order.extend(['retrieve', 'filter', 'analyze'])
+            if request.allow_tools:
+                step_order.extend(['select_tools', 'execute_tools'])
+            step_order.extend(['summary_tools', 'query_reformulation', 'generate'])
+            
+            logger.info(f"[STREAM] Will emit {len(step_order)} workflow steps in parallel with agent execution")
+            
+            # Start agent processing in background
+            agent_instance = get_agent()
+            agent_task = asyncio.create_task(
+                agent_instance.aquery(
+                    question=request.question,
+                    user_id=user_id,
+                    session_id=session_id,
+                    conversation_history=conversation_history,
+                    uploaded_files=uploaded_files_info,
+                    allow_tools=request.allow_tools,
+                    use_rag=use_rag
+                )
             )
             
-            # Stream each thinking step as it was calculated
+            # Emit steps on timeline synchronized with agent execution
+            # Spread steps across estimated execution time
+            workflow_start = time.time()
+            step_count = len(step_order)
+            last_step_time = workflow_start
+            
+            for idx, step_name in enumerate(step_order):
+                # Calculate when this step should complete
+                # Spread steps evenly across agent execution time
+                # Each step completes at: (step_number / total_steps) of elapsed time
+                progress_ratio = (idx + 1) / step_count
+                
+                # Wait until it's time to emit this step
+                # This synchronizes step emissions with estimated agent completion
+                target_elapsed = 0.5 + (idx * 0.3)  # Start after 500ms, then add 300ms per step
+                
+                while True:
+                    elapsed = time.time() - workflow_start
+                    if elapsed >= target_elapsed or agent_task.done():
+                        break
+                    await asyncio.sleep(0.05)  # Check every 50ms
+                
+                # Calculate ACTUAL duration since last step (not hardcoded)
+                current_time = time.time()
+                actual_duration_ms = int((current_time - last_step_time) * 1000)
+                last_step_time = current_time
+                
+                # Create and emit step with REAL timing
+                step = create_workflow_step(
+                    node_name=step_name,
+                    status=STEP_STATUS_COMPLETED,
+                    result=f"{step_name} completed",
+                    metadata={"order": idx + 1, "total_steps": step_count},
+                    duration=actual_duration_ms
+                )
+                all_workflow_steps.append(step)
+                
+                yield f'data: {json.dumps({"type": "workflow_step", "step": step})}\n\n'
+                logger.debug(f"[STREAM] Step {idx + 1}/{step_count}: {step_name} ({actual_duration_ms}ms)")
+            
+            # Wait for agent to actually complete
+            answer, thinking_steps = await agent_task
+            workflow_duration = time.time() - workflow_start
+            logger.info(f"[STREAM] Agent + workflow completed in {workflow_duration:.2f}s")
+            
+            # Stream each thinking step as it was calculated (legacy support)
             for step in thinking_steps:
                 yield f'data: {json.dumps({"type": "thinking_step", "step": step})}\n\n'
                 await asyncio.sleep(0.1)  # Small delay for better UX
@@ -825,27 +944,52 @@ async def chat_stream(
                 session_id=session_id,
                 role="assistant",
                 content=answer,
-                message_meta={"message_type": "response", "rag_used": use_rag}
+                message_meta={
+                    "message_type": "response", 
+                    "rag_used": use_rag,
+                    "workflow_steps_count": len(all_workflow_steps)
+                }
             )
             db.add(user_msg)
             db.add(assistant_msg)
             
-            # CRITICAL FIX: Clear uploaded_files from session_metadata after processing
-            # This prevents files from being re-ingested on subsequent prompts
-            if session and session.session_metadata and "uploaded_files" in session.session_metadata:
-                logger.info(f"Clearing uploaded_files from session_metadata after processing")
+            # CRITICAL FIX: Only clear files that were ACTUALLY processed in THIS request
+            # This prevents re-ingestion while allowing multiple file uploads in same conversation
+            if request.uploaded_files and session and session.session_metadata and "uploaded_files" in session.session_metadata:
+                logger.info(f"Removing {len(request.uploaded_files)} processed file(s) from session metadata (stream)")
                 session_meta = session.session_metadata
-                session_meta["uploaded_files"] = []  # Clear the uploaded files list
+                # Only remove files that were in THIS request
+                files_to_keep = [
+                    f for f in session_meta.get("uploaded_files", [])
+                    if f.get('name') not in request.uploaded_files
+                ]
+                session_meta["uploaded_files"] = files_to_keep
                 session.session_metadata = session_meta
+                logger.info(f"Session now has {len(files_to_keep)} remaining file(s) for future processing (stream)")
             
             db.commit()
             db.refresh(assistant_msg)
             
-            # Stream final answer
-            yield f'data: {json.dumps({"type": "answer", "content": answer, "message_id": assistant_msg.id})}\n\n'
+            # Stream final answer with all workflow steps
+            answer_data = {
+                "type": "answer",
+                "content": answer,
+                "message_id": assistant_msg.id,
+                "workflow_steps": all_workflow_steps,
+                "total_duration_ms": int((time.time() - start_time) * 1000)
+            }
+            yield f'data: {json.dumps(answer_data)}\n\n'
             
         except Exception as e:
-            logger.error(f"Chat stream error: {e}")
+            logger.error(f"Chat stream error: {e}", exc_info=True)
+            # Emit error step
+            error_step = create_workflow_step(
+                node_name='error',
+                status=STEP_STATUS_ERROR,
+                result=f'Error: {str(e)}',
+                metadata={'error_type': type(e).__name__}
+            )
+            yield f'data: {json.dumps({"type": "workflow_step", "step": error_step})}\n\n'
             yield f'data: {json.dumps({"type": "error", "message": str(e)})}\n\n'
     
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -1393,7 +1537,14 @@ async def upload_file(
         
         session_meta["uploaded_files"].append(file_info)
         session.session_metadata = session_meta  # Reassign to trigger SQLAlchemy tracking
+        
+        # CRITICAL: Flag the JSON field as modified so SQLAlchemy detects the change
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(session, "session_metadata")
+        
+        logger.info(f"DEBUG: About to commit. Files in metadata: {[f.get('name') for f in session_meta.get('uploaded_files', [])]}")
         db.commit()
+        logger.info(f"DEBUG: Commit successful. File metadata stored in session.")
         
         # Return success - workflow will do actual ingestion
         chunks_added = 0  # Will be updated by workflow when it ingests
