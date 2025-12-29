@@ -54,10 +54,11 @@ class FileProcessingPipeline:
             logger.warning("Could not import analyze_excel_to_markdown")
 
         try:
-            from src.tools.pdf_tools import analyze_pdf
+            from src.tools.pdf_tools_v2 import analyze_pdf
             self.analyze_pdf = analyze_pdf
+            logger.info("Using pdf_tools_v2 (hybrid extraction)")
         except ImportError:
-            logger.warning("Could not import analyze_pdf from pdf_tools")
+            logger.warning("Could not import analyze_pdf from pdf_tools_v2")
 
     def process(
         self,

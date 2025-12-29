@@ -489,13 +489,15 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
                 logger.warning("Missing user_id or session_id for file ingestion")
                 return state
             
-            # Import file processing tools
-            from ..tools.pdf_tools import analyze_pdf
+            # Import file processing tools (using v2 for better extraction)
+            from ..tools.pdf_tools_v2 import analyze_pdf
             from ..tools.excel_tools import analyze_excel_to_markdown
             from ..tools.image_tools import extract_text_from_image, analyze_image_with_llm, process_financial_image
             import uuid
             from pathlib import Path
             import os
+            
+            logger.info("[WORKFLOW] Using pdf_tools_v2 (hybrid pymupdf + camelot extraction)")
             
             rag_service = getattr(self.agent, 'rag_service', None)
             if not rag_service:

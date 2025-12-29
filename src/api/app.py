@@ -12,13 +12,14 @@ import logging
 import asyncio
 import os
 import tempfile
+import uuid
 from pathlib import Path
 from datetime import datetime, timedelta
 
 from ..agent import FinancialAgent
 from ..tools.financial_report_tools import analyze_financial_report
 from ..tools.excel_tools import analyze_excel_to_markdown
-from ..tools.pdf_tools import analyze_pdf
+from ..tools.pdf_tools_v2 import analyze_pdf
 from ..database.database import get_db, init_db
 from ..database.models import User, ChatSession, ChatMessage
 from ..services.session_service import SessionService
@@ -1454,10 +1455,14 @@ async def upload_file(
     
     Flow:
     1. Create/get chat session
-    2. Ingest file into Qdrant (conversation isolated)
-    3. Return metadata for frontend to send to /api/chat with RAG context
+    2. Save file to persistent uploads directory (not temp)
+    3. Store file metadata in session
+    4. Return metadata for frontend to send to /api/chat with RAG context
+    
+    NOTE: Files are saved to persistent directory so the workflow can access them
+    The workflow will clean up files after successful ingestion
     """
-    temp_path = None
+    file_path = None
     user_id = "anonymous"
     
     try:
@@ -1491,14 +1496,23 @@ async def upload_file(
         logger.info(f"\n============================================================\nUPLOAD: {file_name} ({file_type})\n============================================================")
         logger.info(f"User: {user_id}")
         
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=file_extension,
-            dir=tempfile.gettempdir()
-        ) as temp_file:
-            temp_path = temp_file.name
-            content = await file.read()
-            temp_file.write(content)
+        # Use persistent uploads directory instead of temp directory
+        # This ensures workflow can access files even after HTTP response is sent
+        uploads_dir = Path(__file__).parent.parent.parent / "uploads"
+        uploads_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Create unique filename to avoid collisions
+        unique_name = f"{uuid.uuid4()}_{file_name}"
+        file_path = str(uploads_dir / unique_name)
+        
+        logger.info(f"Saving file to: {file_path}")
+        
+        # Write file to persistent location
+        content = await file.read()
+        with open(file_path, 'wb') as f:
+            f.write(content)
+        
+        logger.info(f"✓ File saved to persistent uploads directory")
         
         if not chat_session_id:
             session = ChatSession(
@@ -1530,7 +1544,7 @@ async def upload_file(
         file_info = {
             "name": file_name,
             "type": file_type,
-            "path": temp_path,
+            "path": file_path,  # Now using persistent file path
             "size": len(content),
             "extension": file_extension
         }
@@ -1562,13 +1576,19 @@ async def upload_file(
         raise
     except Exception as e:
         logger.error(f"Upload error: {str(e)}", exc_info=True)
+        # Clean up file if upload failed
+        if file_path and Path(file_path).exists():
+            try:
+                Path(file_path).unlink()
+                logger.info(f"Cleaned up failed upload: {file_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Could not clean up file {file_path}: {cleanup_error}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
     
     finally:
-        # IMPORTANT: Don't delete temp_path here!
+        # NOTE: Don't delete file_path here!
         # The workflow needs to read it when processing the query
         # The workflow will delete it after ingestion completes
-        # (Or it will be cleaned up by the OS temp directory cleanup)
         pass
 
 

@@ -1,7 +1,7 @@
 """
 PDF Processing Tools - Xử lý file PDF báo cáo tài chính
-Sử dụng pdfplumber để trích xuất text và bảng từ PDF
-Với fallback OCR cho PDF scanned
+Sử dụng Camelot + PyMuPDF để trích xuất text và bảng từ PDF
+Với cải tiến: stream flavor, preamble removal, proper ordering
 """
 
 import os
@@ -16,6 +16,7 @@ from PIL import Image
 from pydantic import BaseModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from ..llm.config import LLMConfig
+from ..services.advanced_pdf_extractor import AdvancedPDFExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +80,12 @@ class PDFAnalysisResult(BaseModel):
 
 def extract_text_from_pdf(pdf_path: str) -> PDFExtractionResult:
     """
-    Trích xuất text và bảng từ file PDF
-    Thử dùng pdfplumber trước (nếu PDF chứa text)
-    Nếu thất bại, fallback sang OCR với pytesseract
+    Trích xuất text và bảng từ file PDF (Advanced version)
+    - Dùng stream flavor cho table detection (better for financial tables)
+    - Tự động loại bỏ preamble rows
+    - Clean section headers
+    - Lọc text để tránh lặp với bảng
+    - Giữ nguyên thứ tự tài liệu gốc
     
     Args:
         pdf_path: Đường dẫn đến file PDF
@@ -90,86 +94,63 @@ def extract_text_from_pdf(pdf_path: str) -> PDFExtractionResult:
         PDFExtractionResult chứa text và tables
     """
     try:
-        logger.info(f"Starting PDF extraction: {pdf_path}")
+        logger.info(f"Starting advanced PDF extraction: {pdf_path}")
         
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"Không tìm thấy file: {pdf_path}")
         
         file_name = Path(pdf_path).name
-        extracted_text = ""
+        
+        # Use advanced extractor
+        result = AdvancedPDFExtractor.extract_with_order(pdf_path)
+        
+        if not result['success']:
+            return PDFExtractionResult(
+                success=False,
+                file_name=file_name,
+                total_pages=0,
+                extracted_text="",
+                tables=[],
+                has_text=False,
+                message=result['message']
+            )
+        
+        # Combine content items into text and tables
+        combined_text = ""
         tables = []
-        has_text = False
+        table_count = 0
         
-        # Bước 1: Cố gắng trích xuất text native từ PDF
-        try:
-            logger.info("Attempting native PDF text extraction with pdfplumber...")
-            with pdfplumber.open(pdf_path) as pdf:
-                total_pages = len(pdf.pages)
-                logger.info(f"PDF has {total_pages} pages")
+        for item in result['content_items']:
+            if item['type'] == 'text':
+                if combined_text:
+                    combined_text += "\n\n"
+                combined_text += item['text']
+            
+            elif item['type'] == 'table':
+                table_count += 1
+                table_data = item['table']
                 
-                # Track text extraction per page
-                pages_with_text = 0
-                
-                # Trích xuất text từ tất cả các trang
-                for page_num, page in enumerate(pdf.pages, 1):
-                    try:
-                        page_text = page.extract_text()
-                        if page_text and page_text.strip():
-                            extracted_text += f"\n--- TRANG {page_num} ---\n{page_text}\n"
-                            pages_with_text += 1
-                            has_text = True
-                        
-                        # Trích xuất bảng
-                        page_tables = page.extract_tables()
-                        if page_tables:
-                            for table_idx, table in enumerate(page_tables):
-                                tables.append({
-                                    "page": page_num,
-                                    "table_index": table_idx,
-                                    "data": table
-                                })
-                                logger.info(f"Found table on page {page_num}")
-                    
-                    except Exception as e:
-                        logger.warning(f"Error extracting from page {page_num}: {e}")
-                        continue
-                
-                # Only consider it "has_text" if majority of pages have text
-                # (not just a header on page 1)
-                text_ratio = pages_with_text / total_pages if total_pages > 0 else 0
-                if text_ratio < 0.3:  # Less than 30% of pages have text = likely scanned
-                    logger.info(f"Only {text_ratio*100:.1f}% pages have native text. Treating as scanned PDF.")
-                    has_text = False
-                    extracted_text = ""  # Reset for OCR fallback
+                tables.append({
+                    "page": item['page'],
+                    "table_index": item['table_index'],
+                    "data": table_data,
+                    "source": item.get('source', 'camelot')
+                })
         
-        except Exception as e:
-            logger.warning(f"Native extraction failed: {e}")
-            has_text = False
-        
-        # Bước 2: Nếu PDF không chứa text (scanned), dùng OCR
-        if not has_text:
-            logger.info("PDF appears to be scanned/image-based. Falling back to OCR...")
-            try:
-                extracted_text = _extract_text_via_ocr(pdf_path)
-                logger.info(f"OCR extraction successful. Extracted {len(extracted_text)} characters")
-            except Exception as e:
-                logger.error(f"OCR extraction failed: {e}")
-                raise
-        
-        logger.info(f"PDF extraction completed. Text length: {len(extracted_text)} chars, Tables found: {len(tables)}")
+        logger.info(f"Advanced extraction completed. Text: {len(combined_text)} chars, Tables: {len(tables)}")
         
         return PDFExtractionResult(
             success=True,
             file_name=file_name,
-            total_pages=total_pages,
-            extracted_text=extracted_text,
+            total_pages=result['total_pages'],
+            extracted_text=combined_text,
             tables=tables,
-            has_text=has_text,
-            message=f"Trích xuất thành công. Method: {'Native' if has_text else 'OCR'}"
+            has_text=len(combined_text) > 0,
+            message=f"Advanced extraction: {len(tables)} tables, {result['total_pages']} pages"
         )
     
     except Exception as e:
-        logger.error(f"Error extracting PDF: {e}")
+        logger.error(f"Error in advanced PDF extraction: {e}")
         return PDFExtractionResult(
             success=False,
             file_name=Path(pdf_path).name if os.path.exists(pdf_path) else "unknown",
