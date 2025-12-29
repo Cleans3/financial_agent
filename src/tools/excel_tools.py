@@ -51,6 +51,8 @@ def detect_and_split_tables(df: pd.DataFrame, sheet_name: str = "") -> List[tupl
     - Column structure changes significantly
     - A header-like row appears (after empty rows)
     
+    Also handles table titles that appear 1 row above the table (separated by empty row).
+    
     Args:
         df: DataFrame from a sheet
         sheet_name: Name of the sheet (for naming tables)
@@ -103,21 +105,42 @@ def detect_and_split_tables(df: pd.DataFrame, sheet_name: str = "") -> List[tupl
             if sep_idx > start_idx:
                 # Extract table section (before the separator)
                 table_section = df.iloc[start_idx:sep_idx].copy()
+                table_name = None
+                
+                # Check if there's a title 1 row above the table
+                # Look for a row with just a few columns filled (looks like a title)
+                if len(table_section) >= 2:
+                    potential_title_row = table_section.iloc[0]
+                    data_row = table_section.iloc[1]
+                    
+                    # Title row should have fewer non-null values than data row
+                    title_nulls = potential_title_row.isna().sum()
+                    data_nulls = data_row.isna().sum()
+                    
+                    if title_nulls > data_nulls and title_nulls < len(potential_title_row) - 2:
+                        # This looks like a title row
+                        title_text = str(potential_title_row.iloc[0]).strip()
+                        if 5 < len(title_text) < 150 and not any(char.isdigit() for char in title_text[-10:]):
+                            table_name = f"{sheet_name} - {title_text}" if sheet_name else title_text
+                            table_section = table_section.iloc[1:].reset_index(drop=True)
+                            logger.debug(f"  Found title 1 row above table: {title_text}")
+                
                 table_section = clean_dataframe(table_section)
                 
                 if not table_section.empty:
-                    # Auto-generate table name
-                    table_num = len(tables) + 1
-                    table_name = f"{sheet_name} - Bảng {table_num}" if sheet_name else f"Bảng {table_num}"
-                    
-                    # Try to extract title from first row if it looks like a header
-                    first_row = table_section.iloc[0]
-                    if not any(pd.isna(first_row)):
-                        # First row has content - might be a title
-                        first_row_str = str(first_row.iloc[0])
-                        if len(first_row_str) > 5 and len(first_row_str) < 100:
-                            table_name = f"{sheet_name} - {first_row_str}" if sheet_name else first_row_str
-                            table_section = table_section.iloc[1:].reset_index(drop=True)
+                    # If no separate title found, try to extract from first row (column headers)
+                    if table_name is None:
+                        table_num = len(tables) + 1
+                        table_name = f"{sheet_name} - Bảng {table_num}" if sheet_name else f"Bảng {table_num}"
+                        
+                        # Try to extract title from first row if it looks like a header
+                        first_row = table_section.iloc[0]
+                        if not any(pd.isna(first_row)):
+                            # First row has content - might be a title
+                            first_row_str = str(first_row.iloc[0])
+                            if len(first_row_str) > 5 and len(first_row_str) < 100:
+                                table_name = f"{sheet_name} - {first_row_str}" if sheet_name else first_row_str
+                                table_section = table_section.iloc[1:].reset_index(drop=True)
                     
                     tables.append((table_section, table_name))
                     logger.info(f"  Detected table: {table_name} ({len(table_section)} rows)")

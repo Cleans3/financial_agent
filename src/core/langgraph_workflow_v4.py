@@ -1143,8 +1143,8 @@ Given the user query: "{query}"
 And the financial data to summarize
 
 Select 2-3 summary techniques that work BEST TOGETHER for comprehensive analysis.
-Respond with ONLY the technique names (comma-separated, from: comparative_analysis, anomaly_detection, 
-materiality_weighted, narrative_arc, key_questions) - nothing else."""
+Respond with ONLY the technique names (comma-separated, from: structured_data_summary, metric_condensing, 
+constraint_listing, feasibility_check) - nothing else."""
             
             logger.debug(f"[SUMMARY:SELECT] Prompt sent to LLM:\n{selection_prompt}")
             
@@ -1166,7 +1166,7 @@ materiality_weighted, narrative_arc, key_questions) - nothing else."""
                 
                 # Ensure 2-3 techniques
                 if len(selected_techniques) < 2:
-                    fallback_techniques = [t for t in ['comparative_analysis', 'anomaly_detection', 'materiality_weighted'] if t not in selected_techniques]
+                    fallback_techniques = [t for t in ['structured_data_summary', 'metric_condensing', 'constraint_listing'] if t not in selected_techniques]
                     selected_techniques.extend(fallback_techniques[:max(0, 2 - len(selected_techniques))])
                 elif len(selected_techniques) > 3:
                     selected_techniques = selected_techniques[:3]
@@ -1174,8 +1174,8 @@ materiality_weighted, narrative_arc, key_questions) - nothing else."""
                 logger.info(f"[SUMMARY:SELECT] LLM selected {len(selected_techniques)} techniques: {selected_techniques}")
                 
             except Exception as e:
-                logger.warning(f"[SUMMARY:SELECT] LLM selection failed: {e}, defaulting to [comparative_analysis, anomaly_detection]")
-                selected_techniques = ["comparative_analysis", "anomaly_detection"]
+                logger.warning(f"[SUMMARY:SELECT] LLM selection failed: {e}, defaulting to [structured_data_summary, metric_condensing]")
+                selected_techniques = ["structured_data_summary", "metric_condensing"]
             
             # Step 4: Execute multiple summary tools
             logger.info(f"[SUMMARY:EXECUTE] Executing {len(selected_techniques)} techniques with {len(best_results)} chunks")
@@ -1204,17 +1204,66 @@ materiality_weighted, narrative_arc, key_questions) - nothing else."""
                         logger.info(f"{summary_result}")
                 
                 if all_results:  # At least one technique succeeded
+                    # Aggregate insights, constraints, categories from all results
+                    aggregated_insights = []
+                    aggregated_constraints = {"binding": [], "tight": [], "slack": []}
+                    aggregated_categories = {}
+                    aggregated_metrics = {}
+                    aggregated_violations = []
+                    
+                    for result in all_results:
+                        # Aggregate insights
+                        if 'insights' in result and result['insights']:
+                            aggregated_insights.extend(result['insights'])
+                        
+                        # Aggregate constraints
+                        if 'binding_constraints' in result:
+                            aggregated_constraints["binding"].extend([c for c in result.get('binding_constraints', []) if c])
+                        if 'tight_constraints' in result:
+                            aggregated_constraints["tight"].extend([c for c in result.get('tight_constraints', []) if c])
+                        if 'slack_constraints' in result:
+                            aggregated_constraints["slack"].extend([c for c in result.get('slack_constraints', []) if c])
+                        
+                        # Aggregate categories
+                        if 'categories' in result:
+                            aggregated_categories.update(result['categories'])
+                        
+                        # Aggregate metrics
+                        if 'metrics' in result:
+                            aggregated_metrics.update({k: v for k, v in result['metrics'].items() if k is not None})
+                        
+                        # Aggregate violations
+                        if 'violations' in result:
+                            aggregated_violations.extend([v for v in result['violations'] if v])
+                    
+                    # Build aggregated summary_result
                     summary_result = {
                         "success": True,
+                        "technique": all_results[0].get('technique', 'unknown') if all_results else 'unknown',
+                        "summary_tool_used": all_results[0].get('summary_tool_used', 'unknown') if all_results else 'unknown',
+                        "summary": "\n\n".join([r.get('summary', '') for r in all_results if r.get('summary')]),
                         "techniques_executed": [r.get('technique', 'unknown') for r in all_results],
                         "results": all_results,
-                        "combined_summary": "\n\n".join([r.get('summary', '') for r in all_results])
+                        "insights": aggregated_insights[:20],  # Top 20 insights
+                        "categories": aggregated_categories if aggregated_categories else None,
+                        "binding_constraints": aggregated_constraints["binding"],
+                        "tight_constraints": aggregated_constraints["tight"],
+                        "slack_constraints": aggregated_constraints["slack"],
+                        "metrics": aggregated_metrics if aggregated_metrics else None,
+                        "violations": aggregated_violations[:10],  # Top 10 violations
+                        "confidence_score": sum(r.get('confidence_score', 0.5) for r in all_results) / len(all_results) if all_results else 0.5
                     }
                     logger.info(f"[SUMMARY:EXECUTE] ✓ Executed {len(all_results)} techniques successfully")
+                    logger.info(f"[SUMMARY:EXECUTE] Aggregated: {len(aggregated_insights)} insights, "
+                               f"{len(aggregated_constraints['binding'])} binding, "
+                               f"{len(aggregated_constraints['tight'])} tight, "
+                               f"{len(aggregated_constraints['slack'])} slack constraints")
                     
                     # Log FULL raw summary results
-                    logger.info(f"[SUMMARY:RESULT] FINAL RAW RESULTS:")
-                    logger.info(f"{summary_result}")
+                    logger.info(f"[SUMMARY:RESULT] FINAL AGGREGATED RESULTS:")
+                    logger.info(f"[SUMMARY:RESULT] Insights: {len(aggregated_insights)}, "
+                               f"Categories: {len(aggregated_categories)}, "
+                               f"Constraints: B={len(aggregated_constraints['binding'])} T={len(aggregated_constraints['tight'])} S={len(aggregated_constraints['slack'])}")
                     
                     # Add metadata
                     summary_result["summary_tools_used"] = selected_techniques
@@ -1350,16 +1399,28 @@ materiality_weighted, narrative_arc, key_questions) - nothing else."""
             else:
                 mentioned_files = []
             
-            # Organize RAG results by source file
-            logger.info("📄 STEP 2: Organize retrieved data by source")
+            # Organize RAG results by source file AND by type
+            logger.info("📄 STEP 2: Organize retrieved data by source and type")
             results_by_source = {}
+            metric_chunks = []
+            structural_chunks = []
+            
             if best_results:
                 for result in best_results:
                     source = result.get("source", result.get("title", "unknown"))
                     if source not in results_by_source:
                         results_by_source[source] = []
                     results_by_source[source].append(result)
+                    
+                    # Also separate by type for cleaner reformulation
+                    if result.get('chunk_type') == 'metric_centric':
+                        metric_chunks.append(result)
+                    else:
+                        structural_chunks.append(result)
+                
                 logger.info(f"  ✓ Organized {len(best_results)} results from {len(results_by_source)} sources")
+                logger.info(f"    - {len(metric_chunks)} metric chunks")
+                logger.info(f"    - {len(structural_chunks)} structural chunks")
             
             # Build structured reformulation
             logger.info("📝 STEP 3: Build structured context for LLM")
@@ -1400,11 +1461,10 @@ materiality_weighted, narrative_arc, key_questions) - nothing else."""
                 
                 # Add technique description
                 technique_to_desc = {
-                    "comparative_analysis": "Tập trung vào THAY ĐỔI (ví dụ: 'Doanh thu tăng tốc 12.1%' thay vì 'Doanh thu là $500M')",
-                    "anomaly_detection": "Phát hiện các BẤT THƯỜNG: mismatch driver, anomaly lịch sử, guidance miss/beat, mẫu mâu thuẫn",
-                    "materiality_weighted": "Phân bổ không gian: 50% top metrics, 35% medium, 15% low",
-                    "narrative_arc": "Cấu trúc như câu chuyện: Setup -> Conflict -> Resolution",
-                    "key_questions": "Trả lời câu hỏi chính: Tăng trưởng nhanh? Gia tốc? Lợi nhuận? Lâu dài? Guidance beat?"
+                    "structured_data_summary": "Organize facts by metric type/category, no interpretation",
+                    "metric_condensing": "Reduce each metric to ONE LINE essentials, no explanation",
+                    "constraint_listing": "List binding/tight/slack constraints, status only",
+                    "feasibility_check": "YES/NO feasibility check with violation list"
                 }
                 technique_used = summary_result.get('summary_tool_used', 'unknown')
                 if technique_used in technique_to_desc:
@@ -1444,44 +1504,104 @@ materiality_weighted, narrative_arc, key_questions) - nothing else."""
                 
                 reformulation_parts.append("")
                 
-                # Add structural chunks for additional context
-                reformulation_parts.append("DỮ LIỆU HỖ TRỢ (CẤU TRÚC TÀI LIỆU):")
-                reformulation_parts.append("Những đoạn tài liệu sau cung cấp ngữ cảnh cho phân tích:")
-                reformulation_parts.append("")
-                
-                # Filter to show only structural chunks for additional context
-                structural_chunks = [r for r in best_results if r.get('chunk_type') == 'structural']
-                for i, result in enumerate(structural_chunks[:3], 1):
-                    content = result.get("text") or result.get("content", "")
-                    source = result.get("source", result.get("filename", "unknown"))
-                    reformulation_parts.append(f"Đoạn {i} từ {source}:")
-                    if content:
-                        # Truncate to 200 chars for supporting context
-                        if len(content) > 200:
-                            reformulation_parts.append(f"{content[:200]}...")
-                        else:
-                            reformulation_parts.append(f"{content}")
-                    else:
-                        reformulation_parts.append("[Nội dung rỗng]")
-                
-                reformulation_parts.append("")
-                
-            elif results_by_source:
-                # No summary: use original retrieved chunks
-                reformulation_parts.append("DỮ LIỆU ĐƯỢC TRUY XUẤT TỪ CƠ SỞ DỮ LIỆU:")
-                
-                for source, results in results_by_source.items():
-                    reformulation_parts.append(f"TỪ TÀI LIỆU: {source}")
-                    for i, result in enumerate(results, 1):
+                # Add structural chunks for context and verification
+                if structural_chunks:
+                    reformulation_parts.append("DỮ LIỆU CẤU TRÚC (VÀO NGỮ CẢN VÀ KIỂM CHỨNG):")
+                    reformulation_parts.append("Những đoạn tài liệu sau cung cấp ngữ cảnh và cho phép xác minh các chỉ số:")
+                    reformulation_parts.append("")
+                    
+                    for i, result in enumerate(structural_chunks[:3], 1):
                         content = result.get("text") or result.get("content", "")
-                        score = result.get("score", 0)
-                        reformulation_parts.append(f"Đoạn {i} (độ liên quan: {score:.2f}):")
-                        # Include FULL content (not truncated) so LLM has complete context
+                        source = result.get("source", result.get("filename", "unknown"))
+                        reformulation_parts.append(f"Đoạn {i} từ {source}:")
                         if content:
-                            reformulation_parts.append(f"{content}")
+                            # Truncate to 200 chars for supporting context
+                            if len(content) > 200:
+                                reformulation_parts.append(f"{content[:200]}...")
+                            else:
+                                reformulation_parts.append(f"{content}")
                         else:
                             reformulation_parts.append("[Nội dung rỗng]")
-                reformulation_parts.append("")
+                        reformulation_parts.append("")
+                
+                # Add metric chunks with instructions
+                if metric_chunks:
+                    reformulation_parts.append("CÁC CHỈ SỐ TÓIỂU (HÃY TÓIỂU HÓA VÀ THÊM VÀO CÂU TRẢ LỜI NẾU CÓ NGHĨA):")
+                    reformulation_parts.append("Các chỉ số sau cần được tóm tắt. Hãy:")
+                    reformulation_parts.append("1. Tóm tắt từng chỉ số")
+                    reformulation_parts.append("2. Thêm vào câu trả lời nếu nó có liên quan và có ý nghĩa")
+                    reformulation_parts.append("3. Hiển thị thông tin chi tiết nếu chúng giải thích được câu hỏi")
+                    reformulation_parts.append("")
+                    
+                    for i, result in enumerate(metric_chunks[:10], 1):
+                        content = result.get("text") or result.get("content", "")
+                        metric_name = result.get("metric_name", "unknown metric")
+                        relevance = result.get("relevance", 1.0)
+                        reformulation_parts.append(f"Chỉ số {i} - {metric_name} (liên quan: {relevance:.0%}):")
+                        if content:
+                            # Include full metric text for LLM to summarize
+                            if len(content) > 500:
+                                reformulation_parts.append(f"{content[:500]}...")
+                            else:
+                                reformulation_parts.append(f"{content}")
+                        else:
+                            reformulation_parts.append("[Nội dung rỗng]")
+                        reformulation_parts.append("")
+                
+                
+            elif best_results:
+                # No summary: Show structured data, then metric chunks
+                
+                # First: Structural chunks for context and verification
+                if structural_chunks:
+                    reformulation_parts.append("DỮ LIỆU CẤU TRÚC (VÀO NGỮ CẢNH VÀ KIỂM CHỨNG):")
+                    reformulation_parts.append("Những đoạn tài liệu sau cung cấp ngữ cảnh và cho phép xác minh các chỉ số:")
+                    reformulation_parts.append("")
+                    
+                    for source, results in results_by_source.items():
+                        source_structural = [r for r in results if r.get('chunk_type') != 'metric_centric']
+                        if source_structural:
+                            reformulation_parts.append(f"TỪ TÀI LIỆU: {source}")
+                            for i, result in enumerate(source_structural[:2], 1):
+                                content = result.get("text") or result.get("content", "")
+                                score = result.get("score", 0)
+                                reformulation_parts.append(f"Đoạn {i} (độ liên quan: {score:.2f}):")
+                                if content:
+                                    # Truncate structural chunks to 250 chars
+                                    if len(content) > 250:
+                                        reformulation_parts.append(f"{content[:250]}...")
+                                    else:
+                                        reformulation_parts.append(f"{content}")
+                                else:
+                                    reformulation_parts.append("[Nội dung rỗng]")
+                            reformulation_parts.append("")
+                
+                # Second: Metric chunks with clear instructions
+                if metric_chunks:
+                    reformulation_parts.append("CÁC CHỈ SỐ (HÃY TÓIỂU HÓA VÀ THÊM VÀO CÂU TRẢ LỜI NẾU CÓ NGHĨA):")
+                    reformulation_parts.append("Các chỉ số sau cần được tóm tắt. Hãy:")
+                    reformulation_parts.append("1. Tóm tắt từng chỉ số")
+                    reformulation_parts.append("2. Thêm vào câu trả lời nếu nó có liên quan và có ý nghĩa")
+                    reformulation_parts.append("3. Hiển thị thông tin chi tiết nếu chúng giải thích được câu hỏi")
+                    reformulation_parts.append("")
+                    
+                    for source, results in results_by_source.items():
+                        source_metrics = [r for r in results if r.get('chunk_type') == 'metric_centric']
+                        if source_metrics:
+                            reformulation_parts.append(f"TỪ TÀI LIỆU: {source}")
+                            for i, result in enumerate(source_metrics[:8], 1):
+                                content = result.get("text") or result.get("content", "")
+                                metric_name = result.get("metric_name", "unknown metric")
+                                score = result.get("score", 0)
+                                relevance = result.get("relevance", 1.0)
+                                reformulation_parts.append(f"Chỉ số {i} - {metric_name} (liên quan: {score:.2f}, độ đáng tin: {relevance:.0%}):")
+                                if content:
+                                    # Include FULL metric content for LLM to analyze
+                                    reformulation_parts.append(f"{content}")
+                                else:
+                                    reformulation_parts.append("[Nội dung rỗng]")
+                            reformulation_parts.append("")
+                
             
             # Section 3: Tool Results
             if tool_results:

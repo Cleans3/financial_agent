@@ -1,283 +1,332 @@
 """
-LLM-Driven Summary Tools - Summary techniques as callable LLM tools
+LLM-Driven Summary Tools - 4 Summary Strategies for Financial Analysis
 
-These tools are similar to regular tools (get_company_info, calculate_rsi, etc.)
-but are designed to summarize financial data using different techniques.
+These tools summarize financial data using 4 different factual approaches:
 
-The LLM can select any of these tools when it detects the user is asking for
-a summary, analysis, anomaly detection, etc.
+1. STRUCTURED DATA SUMMARY: Organize facts by category (headlines, production, workforce, etc.)
+2. METRIC CONDENSING: Reduce to absolute essentials (one-line per metric, no explanation)
+3. CONSTRAINT LISTING: List which constraints are binding vs slack (status only, no interpretation)
+4. FEASIBILITY CHECK: Simple YES/NO feasibility check with any violations if found
+
+Key principle: FACTS ONLY
+- No interpretation ("this means...", "it's important...")
+- No recommendations
+- No explanations beyond what the data shows
+- Just organized facts in different formats
 
 Each tool:
 1. Takes retrieval results + user query as input
-2. Returns structured summary output
+2. Returns structured, factual summary output
 3. Is passed to query_reformulation which combines with structural chunks
-4. Final answer generated from summary + structural chunks (not raw retrieval)
+4. Final answer generated from summary + structural chunks
 """
 
 import logging
 from typing import List, Dict, Optional, Any
-from src.services.advanced_summary_tools import (
-    SummaryTechnique,
-    ComparativeAnalysisSummarizer,
-    AnomalyDetectionSummarizer,
-    MaterialityWeightedSummarizer,
-    NarrativeArcSummarizer,
-    KeyQuestionsAnsweringSummarizer
-)
 
 logger = logging.getLogger(__name__)
 
 
 class SummaryToolsProvider:
-    """Provides callable summary tools for LLM usage"""
+    """Provides 4 factual summary tools for LLM usage"""
     
     @staticmethod
-    def comparative_analysis_tool(chunks: List[Dict], query: str) -> Dict[str, Any]:
+    def structured_data_summary_tool(chunks: List[Dict], query: str) -> Dict[str, Any]:
         """
-        LLM-callable tool: Comparative Analysis Summarization
+        Tool 1: STRUCTURED DATA SUMMARY
+        Organize metric chunks into clear categories.
+        Returns: Facts organized by topic/category
         
-        Highlights WHAT CHANGED rather than just stating values.
-        Example: "Revenue accelerated 12.1%" vs "Revenue was $500M"
-        
-        Args:
-            chunks: Retrieved document chunks (metric-centric + structural)
-            query: Original user query
-            
-        Returns:
-            Dictionary with comparative analysis summary
+        Output fields for reformulation:
+        - summary: Text summary of structured facts
+        - categories: Dict of organized metrics
+        - insights: List of key facts/metrics
         """
-        logger.info("[SUMMARY:TOOL] Executing comparative_analysis tool")
-        logger.info(f"[SUMMARY:TOOL] Received {len(chunks)} chunks for processing")
+        logger.info("[SUMMARY:TOOL] Executing structured_data_summary tool")
         
         try:
-            # DEBUG: Log chunk structure and chunk_type values
-            logger.info("[SUMMARY:TOOL] Analyzing chunk structure:")
-            for i, chunk in enumerate(chunks[:3]):  # Log first 3 chunks
-                chunk_type = chunk.get('chunk_type', 'NOT_SET')
-                chunk_keys = list(chunk.keys())
-                logger.info(f"  Chunk {i}: chunk_type={chunk_type}, keys={chunk_keys[:5]}...")
+            # Extract metric chunks
+            metric_chunks = [c for c in chunks if c.get('chunk_type') == 'metric_centric']
+            if not metric_chunks:
+                metric_chunks = chunks
             
-            # Extract metric texts from chunks
-            metric_texts = [chunk.get('text', '') for chunk in chunks if chunk.get('chunk_type') == 'metric_centric']
-            logger.info(f"[SUMMARY:TOOL] Found {len(metric_texts)} metric chunks (checking for 'metric_centric' type)")
+            logger.info(f"[SUMMARY:TOOL] Organizing {len(metric_chunks)} metrics into structured categories")
             
-            if not metric_texts:
-                logger.warning("[SUMMARY:TOOL] No metric chunks available for comparative analysis")
-                # Log all chunk_types for debugging
-                chunk_types = set([chunk.get('chunk_type', 'NOT_SET') for chunk in chunks])
-                logger.warning(f"[SUMMARY:TOOL] Chunk types found in input: {chunk_types}")
-                # Fallback to structural chunks
-                metric_texts = [chunk.get('text', '') for chunk in chunks]
+            # Organize by metric type
+            categories = {}
+            insights = []
+            summary_parts = []
             
-            # Apply comparative analysis
-            result = ComparativeAnalysisSummarizer.summarize(metric_texts, query)
+            for chunk in metric_chunks:
+                metric_type = chunk.get('metric_type', 'other')
+                metric_name = chunk.get('metric_name') or 'unknown'
+                text = chunk.get('text', '')
+                
+                if metric_type not in categories:
+                    categories[metric_type] = {
+                        "count": 0,
+                        "metrics": [],
+                        "facts": []
+                    }
+                
+                categories[metric_type]["count"] += 1
+                categories[metric_type]["metrics"].append(metric_name)
+                if len(categories[metric_type]["facts"]) < 2:
+                    categories[metric_type]["facts"].append(text[:100])
+                insights.append(f"{metric_name}: {text[:80]}")
             
-            logger.info(f"[SUMMARY:TOOL] ✓ Comparative analysis: {len(result.get('insights', []))} insights")
+            # Build summary text
+            for category, data in categories.items():
+                summary_parts.append(f"{category}: {data['count']} metrics ({', '.join(data['metrics'][:3])})")
+            
+            summary_text = " | ".join(summary_parts)
+            
+            logger.info(f"[SUMMARY:TOOL] ✓ Organized {len(metric_chunks)} metrics into {len(categories)} categories")
+            
             return {
                 "success": True,
-                "tool_name": "comparative_analysis",
-                "summary": result.get('summary', ''),
-                "insights": result.get('insights', []),
-                "metrics_analyzed": result.get('metrics_analyzed', 0),
-                "technique": "Comparative Analysis - Highlights what changed"
+                "tool_name": "structured_data_summary",
+                "summary": summary_text,
+                "categories": categories,
+                "insights": insights[:10],  # Top 10 insights for reformulation
+                "total_metrics": len(metric_chunks),
+                "summary_tool_used": "structured_data_summary",
+                "confidence_score": min(0.95, len(metric_chunks) / 100),
+                "technique": "Structured Data Summary - Facts organized by category"
             }
         except Exception as e:
-            logger.error(f"[SUMMARY:TOOL] Comparative analysis failed: {e}")
-            return {"success": False, "error": str(e), "tool_name": "comparative_analysis"}
+            logger.error(f"[SUMMARY:TOOL] Structured summary failed: {e}")
+            return {"success": False, "error": str(e), "tool_name": "structured_data_summary"}
     
     @staticmethod
-    def anomaly_detection_tool(chunks: List[Dict], query: str) -> Dict[str, Any]:
+    def metric_condensing_tool(chunks: List[Dict], query: str) -> Dict[str, Any]:
         """
-        LLM-callable tool: Anomaly Detection Summarization
+        Tool 2: METRIC CONDENSING
+        Reduce each metric to ONLY essential information.
         
-        Automatically flags unusual patterns:
-        - Driver reconciliation mismatches
-        - Historical anomalies (>15% deviation from 3-year avg)
-        - Guidance beats/misses
-        - Contra-intuitive patterns (revenue up but customers down)
-        
-        Args:
-            chunks: Retrieved document chunks
-            query: Original user query
-            
-        Returns:
-            Dictionary with detected anomalies
+        Output fields for reformulation:
+        - summary: Condensed summary of all essentials
+        - metrics: Dict of one-line essentials per metric
+        - insights: List of top condensed facts
         """
-        logger.info("[SUMMARY:TOOL] Executing anomaly_detection tool")
+        logger.info("[SUMMARY:TOOL] Executing metric_condensing tool")
         
         try:
-            metric_texts = [chunk.get('text', '') for chunk in chunks if chunk.get('chunk_type') == 'metric_centric']
-            if not metric_texts:
-                metric_texts = [chunk.get('text', '') for chunk in chunks]
+            # Extract metric chunks
+            metric_chunks = [c for c in chunks if c.get('chunk_type') == 'metric_centric']
+            if not metric_chunks:
+                metric_chunks = chunks
             
-            result = AnomalyDetectionSummarizer.summarize(metric_texts, query)
+            logger.info(f"[SUMMARY:TOOL] Condensing {len(metric_chunks)} metrics to essentials")
             
-            logger.info(f"[SUMMARY:TOOL] ✓ Anomaly detection: {len(result.get('anomalies', []))} anomalies found")
+            # Extract just essential information per metric
+            condensed = {}
+            insights = []
+            
+            for chunk in metric_chunks:
+                metric_name = chunk.get('metric_name') or 'unknown'
+                text = chunk.get('text', '')
+                
+                # Keep only first sentence/key facts (no explanation)
+                essential = text.split('.')[0].strip()
+                if len(essential) > 150:
+                    essential = essential[:150] + "..."
+                
+                condensed[metric_name] = essential
+                insights.append(f"{metric_name}: {essential}")
+            
+            # Build condensed summary
+            summary_parts = [f"{k}: {v}" for k, v in list(condensed.items())[:5]]
+            summary_text = " | ".join(summary_parts)
+            
+            logger.info(f"[SUMMARY:TOOL] ✓ Condensed {len(condensed)} metrics")
+            
             return {
                 "success": True,
-                "tool_name": "anomaly_detection",
-                "summary": result.get('summary', ''),
-                "anomalies": result.get('anomalies', []),
-                "confidence_scores": result.get('confidence_scores', {}),
-                "technique": "Anomaly Detection - Flags unusual patterns and mismatches"
+                "tool_name": "metric_condensing",
+                "summary": summary_text,
+                "metrics": condensed,
+                "insights": insights[:10],  # Top 10 condensed metrics
+                "total_metrics": len(condensed),
+                "summary_tool_used": "metric_condensing",
+                "confidence_score": 0.90,
+                "technique": "Metric Condensing - Essentials only, no explanation"
             }
         except Exception as e:
-            logger.error(f"[SUMMARY:TOOL] Anomaly detection failed: {e}")
-            return {"success": False, "error": str(e), "tool_name": "anomaly_detection"}
+            logger.error(f"[SUMMARY:TOOL] Metric condensing failed: {e}")
+            return {"success": False, "error": str(e), "tool_name": "metric_condensing"}
     
     @staticmethod
-    def materiality_weighted_tool(chunks: List[Dict], query: str) -> Dict[str, Any]:
+    def constraint_listing_tool(chunks: List[Dict], query: str) -> Dict[str, Any]:
         """
-        LLM-callable tool: Materiality-Weighted Summarization
+        Tool 3: CONSTRAINT LISTING (Factual Only)
+        List which constraints are binding vs slack.
         
-        Scores each metric by importance and allocates summary space:
-        - 50% to top metrics
-        - 35% to medium-importance metrics
-        - 15% to low-importance metrics
-        
-        Args:
-            chunks: Retrieved document chunks
-            query: Original user query
-            
-        Returns:
-            Dictionary with materiality-weighted summary
+        Output fields for reformulation:
+        - summary: Summary of constraint status
+        - binding_constraints: List of binding metrics
+        - tight_constraints: List of tight constraints
+        - slack_constraints: List of slack constraints
+        - insights: Constraint status facts
         """
-        logger.info("[SUMMARY:TOOL] Executing materiality_weighted tool")
+        logger.info("[SUMMARY:TOOL] Executing constraint_listing tool")
         
         try:
-            metric_texts = [chunk.get('text', '') for chunk in chunks if chunk.get('chunk_type') == 'metric_centric']
-            if not metric_texts:
-                metric_texts = [chunk.get('text', '') for chunk in chunks]
+            metric_chunks = [c for c in chunks if c.get('chunk_type') == 'metric_centric']
+            if not metric_chunks:
+                metric_chunks = chunks
             
-            result = MaterialityWeightedSummarizer.summarize(metric_texts, query)
+            logger.info(f"[SUMMARY:TOOL] Analyzing {len(metric_chunks)} metrics for constraints")
             
-            logger.info(f"[SUMMARY:TOOL] ✓ Materiality-weighted: {len(result.get('sections', {}).keys())} metric groups")
+            # Categorize by binding status
+            constraints = {
+                "binding": [],
+                "tight": [],
+                "slack": []
+            }
+            
+            for chunk in metric_chunks:
+                metric_name = chunk.get('metric_name') or 'unknown'
+                confidence = chunk.get('confidence', 0.5)
+                
+                if confidence >= 0.95:
+                    constraints["binding"].append(metric_name)
+                elif confidence >= 0.80:
+                    constraints["tight"].append(metric_name)
+                else:
+                    constraints["slack"].append(metric_name)
+            
+            # Build summary
+            summary_parts = [
+                f"Binding: {len(constraints['binding'])} metrics",
+                f"Tight: {len(constraints['tight'])} metrics",
+                f"Slack: {len(constraints['slack'])} metrics"
+            ]
+            summary_text = " | ".join(summary_parts)
+            
+            # Build insights
+            insights = []
+            for metric in constraints['binding'][:5]:
+                insights.append(f"[BINDING] {metric}")
+            for metric in constraints['tight'][:5]:
+                insights.append(f"[TIGHT] {metric}")
+            
+            logger.info(f"[SUMMARY:TOOL] ✓ Constraints: {len(constraints['binding'])} binding, "
+                       f"{len(constraints['tight'])} tight, {len(constraints['slack'])} slack")
+            
             return {
                 "success": True,
-                "tool_name": "materiality_weighted",
-                "summary": result.get('summary', ''),
-                "sections": result.get('sections', {}),
-                "weighting_ratios": result.get('weighting_ratios', {}),
-                "technique": "Materiality-Weighted - Allocates space by metric importance (50/35/15)"
+                "tool_name": "constraint_listing",
+                "summary": summary_text,
+                "binding_constraints": constraints["binding"],
+                "tight_constraints": constraints["tight"],
+                "slack_constraints": constraints["slack"],
+                "insights": insights,
+                "summary_tool_used": "constraint_listing",
+                "confidence_score": 0.88,
+                "technique": "Constraint Listing - Factual status only"
             }
         except Exception as e:
-            logger.error(f"[SUMMARY:TOOL] Materiality-weighted failed: {e}")
-            return {"success": False, "error": str(e), "tool_name": "materiality_weighted"}
+            logger.error(f"[SUMMARY:TOOL] Constraint listing failed: {e}")
+            return {"success": False, "error": str(e), "tool_name": "constraint_listing"}
     
     @staticmethod
-    def narrative_arc_tool(chunks: List[Dict], query: str) -> Dict[str, Any]:
+    def feasibility_check_tool(chunks: List[Dict], query: str) -> Dict[str, Any]:
         """
-        LLM-callable tool: Narrative Arc Summarization
+        Tool 4: FEASIBILITY CHECK
+        Simple YES/NO feasibility check with violations if any.
         
-        Structures summary as a story:
-        - Setup: Context (what was the starting position?)
-        - Conflict: What changed (what challenges/opportunities emerged?)
-        - Resolution: What it means (what are the implications?)
-        
-        Args:
-            chunks: Retrieved document chunks
-            query: Original user query
-            
-        Returns:
-            Dictionary with narrative arc summary
+        Output fields for reformulation:
+        - summary: YES/NO feasibility status
+        - feasible: Feasibility answer
+        - violations: List of violations found
+        - insights: Violation details
         """
-        logger.info("[SUMMARY:TOOL] Executing narrative_arc tool")
+        logger.info("[SUMMARY:TOOL] Executing feasibility_check tool")
         
         try:
-            metric_texts = [chunk.get('text', '') for chunk in chunks if chunk.get('chunk_type') == 'metric_centric']
-            if not metric_texts:
-                metric_texts = [chunk.get('text', '') for chunk in chunks]
+            metric_chunks = [c for c in chunks if c.get('chunk_type') == 'metric_centric']
+            if not metric_chunks:
+                metric_chunks = chunks
             
-            result = NarrativeArcSummarizer.summarize(metric_texts, query)
+            logger.info(f"[SUMMARY:TOOL] Checking feasibility of {len(metric_chunks)} metrics")
             
-            logger.info(f"[SUMMARY:TOOL] ✓ Narrative arc: {len(result.get('sections', {}))} story sections")
+            # Check for violations (factual only)
+            violations = []
+            is_feasible = True
+            
+            for chunk in metric_chunks:
+                metric_name = chunk.get('metric_name') or 'unknown'
+                confidence = chunk.get('confidence', 0.5)
+                relevance = chunk.get('relevance', 1.0)
+                
+                # Violations are FACTUAL metric quality issues
+                if confidence < 0.5:
+                    violations.append(f"{metric_name}: low confidence ({confidence:.0%})")
+                    is_feasible = False
+                
+                if relevance < 0.3:
+                    violations.append(f"{metric_name}: low relevance ({relevance:.0%})")
+                    is_feasible = False
+            
+            # Determine feasibility status
+            if is_feasible and len(metric_chunks) > 0:
+                feasibility_status = "YES"
+            elif not is_feasible:
+                feasibility_status = "NO"
+            else:
+                feasibility_status = "PARTIAL"
+            
+            summary_text = f"Feasibility: {feasibility_status}"
+            if violations:
+                summary_text += f" ({len(violations)} violations)"
+            
+            logger.info(f"[SUMMARY:TOOL] ✓ Feasibility: {feasibility_status}, violations: {len(violations)}")
+            
             return {
                 "success": True,
-                "tool_name": "narrative_arc",
-                "summary": result.get('summary', ''),
-                "sections": result.get('sections', {}),
-                "narrative_flow": result.get('narrative_flow', ''),
-                "technique": "Narrative Arc - Structures as Setup -> Conflict -> Resolution story"
+                "tool_name": "feasibility_check",
+                "summary": summary_text,
+                "feasible": feasibility_status,
+                "total_constraints_checked": len(metric_chunks),
+                "violations": violations,
+                "insights": violations,  # For reformulation
+                "summary_tool_used": "feasibility_check",
+                "confidence_score": 0.92,
+                "technique": "Feasibility Check - Status with violation list"
             }
         except Exception as e:
-            logger.error(f"[SUMMARY:TOOL] Narrative arc failed: {e}")
-            return {"success": False, "error": str(e), "tool_name": "narrative_arc"}
-    
-    @staticmethod
-    def key_questions_tool(chunks: List[Dict], query: str) -> Dict[str, Any]:
-        """
-        LLM-callable tool: Key Questions Answerer
-        
-        Directly answers what analysts ask:
-        - Is growth fast? Is it accelerating?
-        - Are margins expanding?
-        - Is growth profitable?
-        - Is this sustainable?
-        - Did they beat guidance?
-        
-        Args:
-            chunks: Retrieved document chunks
-            query: Original user query
-            
-        Returns:
-            Dictionary with answers to key questions
-        """
-        logger.info("[SUMMARY:TOOL] Executing key_questions tool")
-        
-        try:
-            metric_texts = [chunk.get('text', '') for chunk in chunks if chunk.get('chunk_type') == 'metric_centric']
-            if not metric_texts:
-                metric_texts = [chunk.get('text', '') for chunk in chunks]
-            
-            result = KeyQuestionsAnsweringSummarizer.summarize(metric_texts, query)
-            
-            logger.info(f"[SUMMARY:TOOL] ✓ Key questions: {len(result.get('answers', {}))} answers provided")
-            return {
-                "success": True,
-                "tool_name": "key_questions",
-                "summary": result.get('summary', ''),
-                "answers": result.get('answers', {}),
-                "confidence_scores": result.get('confidence_scores', {}),
-                "technique": "Key Questions - Answers: Growth? Margins? Profitability? Sustainability? Guidance?"
-            }
-        except Exception as e:
-            logger.error(f"[SUMMARY:TOOL] Key questions failed: {e}")
-            return {"success": False, "error": str(e), "tool_name": "key_questions"}
+            logger.error(f"[SUMMARY:TOOL] Feasibility check failed: {e}")
+            return {"success": False, "error": str(e), "tool_name": "feasibility_check"}
     
     @staticmethod
     def get_all_tools() -> Dict[str, callable]:
-        """Get all summary tools as callable functions"""
+        """Get all 4 summary tools as callable functions"""
         return {
-            "comparative_analysis": SummaryToolsProvider.comparative_analysis_tool,
-            "anomaly_detection": SummaryToolsProvider.anomaly_detection_tool,
-            "materiality_weighted": SummaryToolsProvider.materiality_weighted_tool,
-            "narrative_arc": SummaryToolsProvider.narrative_arc_tool,
-            "key_questions": SummaryToolsProvider.key_questions_tool,
+            "structured_data_summary": SummaryToolsProvider.structured_data_summary_tool,
+            "metric_condensing": SummaryToolsProvider.metric_condensing_tool,
+            "constraint_listing": SummaryToolsProvider.constraint_listing_tool,
+            "feasibility_check": SummaryToolsProvider.feasibility_check_tool,
         }
     
     @staticmethod
     def get_tool_descriptions() -> Dict[str, str]:
         """Get descriptions for LLM tool selection"""
         return {
-            "comparative_analysis": (
-                "Highlights what CHANGED ('Revenue accelerated 12.1%') rather than just stating values "
-                "('Revenue was $500M'). Use when user asks for changes, trends, growth, acceleration."
+            "structured_data_summary": (
+                "Organize facts by metric type/category. Shows what metrics measure without interpretation. "
+                "Use when user wants organized, categorized facts about different metrics."
             ),
-            "anomaly_detection": (
-                "Flags unusual patterns: driver mismatches, historical anomalies (>15% deviation), "
-                "guidance beats/misses, contra-intuitive patterns. Use when user asks about anomalies, "
-                "concerns, risks, unusual patterns."
+            "metric_condensing": (
+                "Reduce each metric to ONE LINE of essentials - just numbers and key facts, no explanation. "
+                "Use when user wants quick, condensed reference of metrics."
             ),
-            "materiality_weighted": (
-                "Allocates summary space by importance: 50% top metrics, 35% medium, 15% low. "
-                "Use when user needs a balanced, importance-weighted analysis of multiple metrics."
+            "constraint_listing": (
+                "List metrics by constraint status: binding (must hold), tight (limited slack), slack (flexible). "
+                "Factual status only. Use when user wants to understand constraint tightness."
             ),
-            "narrative_arc": (
-                "Structures as a story: Setup (context) -> Conflict (what changed) -> Resolution (implications). "
-                "Use when user wants a narrative, story-like explanation of financial performance."
-            ),
-            "key_questions": (
-                "Directly answers what analysts ask: Growth? Acceleration? Margins expanding? "
-                "Profitable growth? Sustainable? Guidance beat? Use when user asks fundamental investment questions."
+            "feasibility_check": (
+                "Simple YES/NO feasibility with list of violations. Factual check only, no interpretation. "
+                "Use when user wants quick feasibility assessment of metrics/constraints."
             ),
         }
