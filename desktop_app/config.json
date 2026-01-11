@@ -1,0 +1,17 @@
+{
+  "windowConfig": {
+    "width": 1400,
+    "height": 900,
+    "minWidth": 1024,
+    "minHeight": 600
+  },
+  "devTools": {
+    "enabled": true
+  },
+  "apiProxy": {
+    "target": "http://localhost:8000",
+    "prefix": "/api"
+  },
+  "appName": "Financial Agent",
+  "appVersion": "1.0.0"
+}

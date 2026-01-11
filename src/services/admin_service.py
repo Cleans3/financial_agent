@@ -175,8 +175,8 @@ class AdminService:
             # Average messages per session
             avg_messages = (total_messages / total_sessions) if total_sessions > 0 else 0
             
-            # RAG adoption rate
-            rag_adoption = (rag_sessions / total_sessions * 100) if total_sessions > 0 else 0
+            # RAG adoption rate (as decimal, not percentage)
+            rag_adoption = (rag_sessions / total_sessions) if total_sessions > 0 else 0
             
             return {
                 'users': {
@@ -186,20 +186,26 @@ class AdminService:
                 },
                 'sessions': {
                     'total': total_sessions,
-                    'with_rag': rag_sessions,
-                    'rag_adoption_percent': round(rag_adoption, 2)
+                    'active': rag_sessions,
+                    'rag_adoption': rag_adoption
                 },
                 'messages': {
                     'total': total_messages,
                     'last_24h': messages_24h,
-                    'avg_per_session': round(avg_messages, 2)
+                    'avg_per_session': avg_messages
                 },
                 'timestamp': datetime.utcnow().isoformat()
             }
         
         except Exception as e:
             logger.error(f"Error getting system stats: {e}")
-            return {}
+            # Return safe defaults
+            return {
+                'users': {'total': 0, 'active': 0, 'admins': 0},
+                'sessions': {'total': 0, 'active': 0, 'rag_adoption': 0},
+                'messages': {'total': 0, 'last_24h': 0, 'avg_per_session': 0},
+                'timestamp': datetime.utcnow().isoformat()
+            }
     
     @staticmethod
     def get_audit_logs(db: Session, user_id: Optional[str] = None, days: int = 7) -> List[Dict]:
@@ -290,14 +296,22 @@ class AdminService:
             from src.services.multi_collection_rag_service import get_rag_service
             
             rag_service = get_rag_service()
-            rag_stats = rag_service.get_stats()
+            rag_stats = rag_service.get_stats() or {}
             
             # Count RAG sessions
             rag_sessions = db.query(ChatSession).filter(ChatSession.use_rag == True).count()
             total_sessions = db.query(ChatSession).count()
             
+            # Build response with safe defaults
             return {
-                **rag_stats,
+                'vector_database': rag_stats.get('vector_database', 'qdrant'),
+                'total_vectors': rag_stats.get('total_vectors', 0),
+                'total_collections': rag_stats.get('total_collections', 0),
+                'queries_by_type': rag_stats.get('queries_by_type', {
+                    'semantic': 0,
+                    'keyword': 0,
+                    'hybrid': 0
+                }),
                 'sessions_with_rag': rag_sessions,
                 'total_sessions': total_sessions,
                 'adoption_rate': f"{(rag_sessions / total_sessions * 100) if total_sessions > 0 else 0:.1f}%"
@@ -305,7 +319,20 @@ class AdminService:
         
         except Exception as e:
             logger.error(f"Error getting RAG stats: {e}")
-            return {}
+            # Return safe defaults on error
+            return {
+                'vector_database': 'qdrant',
+                'total_vectors': 0,
+                'total_collections': 0,
+                'queries_by_type': {
+                    'semantic': 0,
+                    'keyword': 0,
+                    'hybrid': 0
+                },
+                'sessions_with_rag': 0,
+                'total_sessions': 0,
+                'adoption_rate': '0.0%'
+            }
     
     @staticmethod
     def delete_user_data(db: Session, user_id: str) -> bool:

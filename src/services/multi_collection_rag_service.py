@@ -16,14 +16,15 @@ logger = logging.getLogger(__name__)
 
 class MultiCollectionRAGService:
     
-    def __init__(self):
+    def __init__(self, llm=None):
         self.qd_manager = QdrantCollectionManager()
         self.embedding_strategy = get_embedding_strategy()
         self.summarization_strategy = get_summarization_strategy()
-        # Initialize advanced chunking service for two-level chunking
+        # Initialize advanced chunking service with LLM for metric extraction
         self.advanced_chunking = AdvancedChunkingService(
             chunk_size=settings.CHUNK_SIZE_TOKENS,
-            chunk_overlap=settings.CHUNK_OVERLAP_TOKENS
+            chunk_overlap=settings.CHUNK_OVERLAP_TOKENS,
+            llm=llm  # Pass LLM for accurate metric extraction
         )
         logger.info("[INGEST:INIT] ✓ Advanced chunking service initialized")
     
@@ -1133,14 +1134,67 @@ class MultiCollectionRAGService:
         except Exception as e:
             logger.warning(f"Global keyword search failed: {e}")
             return []
+    
+    def get_stats(self) -> Dict:
+        """
+        Get RAG service statistics from Qdrant collections
+        
+        Returns:
+            Dictionary with RAG service statistics
+        """
+        try:
+            stats = {
+                'vector_database': 'qdrant',
+                'embedding_strategy': self.embedding_strategy.__class__.__name__,
+                'total_vectors': 0,
+                'total_collections': 0,
+                'queries_by_type': {
+                    'semantic': 0,
+                    'keyword': 0,
+                    'hybrid': 0
+                },
+                'chunk_size': settings.CHUNK_SIZE_TOKENS,
+                'chunk_overlap': settings.CHUNK_OVERLAP_TOKENS
+            }
+            
+            # Try to get global collection stats
+            try:
+                global_info = self.qd_manager.qdrant_client.get_collection("global_admin")
+                stats['total_vectors'] += global_info.points_count
+                stats['total_collections'] += 1
+            except Exception as e:
+                logger.debug(f"Could not get global collection stats: {e}")
+            
+            # Queries by type - these would be tracked during actual queries
+            # For now, return default structure
+            stats['queries_by_type'] = {
+                'semantic': 0,
+                'keyword': 0,
+                'hybrid': 0
+            }
+            
+            return stats
+        
+        except Exception as e:
+            logger.error(f"Error getting RAG stats: {e}")
+            return {
+                'vector_database': 'qdrant',
+                'total_vectors': 0,
+                'total_collections': 0,
+                'queries_by_type': {
+                    'semantic': 0,
+                    'keyword': 0,
+                    'hybrid': 0
+                }
+            }
 
 # Global singleton instance
 _rag_service_instance = None
 
 
-def get_rag_service() -> MultiCollectionRAGService:
+def get_rag_service(llm=None) -> MultiCollectionRAGService:
     """Factory function to get RAG service singleton instance"""
     global _rag_service_instance
     if _rag_service_instance is None:
-        _rag_service_instance = MultiCollectionRAGService()
+        _rag_service_instance = MultiCollectionRAGService(llm=llm)
     return _rag_service_instance

@@ -59,8 +59,8 @@ class FinancialAgent:
         # Initialize RAG service for workflow access
         try:
             from ..services.multi_collection_rag_service import get_rag_service
-            self.rag_service = get_rag_service()
-            logger.info("✅ RAG service initialized")
+            self.rag_service = get_rag_service(llm=self.llm)
+            logger.info("✅ RAG service initialized with LLM for metric extraction")
         except Exception as e:
             logger.warning(f"❌ RAG service initialization failed: {e}")
             self.rag_service = None
@@ -102,11 +102,11 @@ class FinancialAgent:
             logger.warning(f"❌ V3 workflow not available: {e}")
             self.langgraph_workflow_v3 = None
         
-        # Create V4 workflow (13-node - latest)
+        # Create V4 workflow (18-node - latest)
         try:
             from ..core.langgraph_workflow_v4 import LangGraphWorkflowV4
             self.langgraph_workflow_v4 = LangGraphWorkflowV4(self, enable_observer=settings.WORKFLOW_OBSERVER_ENABLED)
-            logger.info("✅ V4 workflow loaded (13-node complete architecture)")
+            logger.info("✅ V4 workflow loaded (18-node complete architecture)")
         except Exception as e:
             logger.warning(f"❌ V4 workflow not available: {e}")
             self.langgraph_workflow_v4 = None
@@ -126,7 +126,7 @@ class FinancialAgent:
         if self.langgraph_workflow_v3:
             logger.info("   - V3 (8-node): self.langgraph_workflow_v3")
         if self.langgraph_workflow_v4:
-            logger.info("   - V4 (13-node): self.langgraph_workflow_v4 ⭐")
+            logger.info("   - V4 (18-node): self.langgraph_workflow_v4 ⭐")
     
     def _get_tool_descriptions(self) -> str:
         """Get formatted tool descriptions for prompt"""
@@ -604,7 +604,7 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
         logger.info("LangGraph workflow created successfully!")
         return app
     
-    async def aquery(self, question: str, user_id: str = None, session_id: str = None, conversation_history: list = None, uploaded_files: list = None, rag_documents: list = None, allow_tools: bool = True, use_rag: bool = True, summarize_results: bool = True) -> tuple:
+    async def aquery(self, question: str, user_id: str = None, session_id: str = None, conversation_history: list = None, uploaded_files: list = None, rag_documents: list = None, allow_tools: bool = True, use_rag: bool = True, summarize_results: bool = True, observer_callback: callable = None) -> tuple:
         """
         Async query - Main entry point using simplified 2-node LangGraph workflow.
         
@@ -700,10 +700,11 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
             
             # Invoke the selected workflow
             if selected_version == "v4" and self.langgraph_workflow_v4:
-                logger.info(f"➡️  Using V4 (13-node complete architecture)")
+                logger.info(f"➡️  Using V4 (18-node complete architecture)")
                 logger.info(f"[INVOKE] Passing to workflow:")
                 logger.info(f"[INVOKE]   - uploaded_files type: {type(uploaded_files)}")
                 logger.info(f"[INVOKE]   - uploaded_files length: {len(uploaded_files) if uploaded_files else 0}")
+                logger.info(f"[INVOKE]   - observer_callback: {'enabled' if observer_callback else 'disabled'}")
                 if uploaded_files:
                     logger.info(f"[INVOKE]   - uploaded_files content: {uploaded_files}")
                 final_state = await self.langgraph_workflow_v4.invoke(
@@ -713,7 +714,8 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                     user_id=user_id or "default",
                     session_id=session_id or "default",
                     use_rag=use_rag,
-                    tools_enabled=allow_tools
+                    tools_enabled=allow_tools,
+                    observer_callback=observer_callback
                 )
             elif selected_version == "v3" and self.langgraph_workflow_v3:
                 logger.info(f"\n➡️  Using V3 (8-node enhanced architecture)")
@@ -724,7 +726,8 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                     user_id=user_id or "default",
                     session_id=session_id or "default",
                     use_rag=use_rag,
-                    tools_enabled=allow_tools
+                    tools_enabled=allow_tools,
+                    observer_callback=observer_callback
                 )
             else:
                 logger.info(f"\n➡️  Fallback to legacy 10-node (simplified)")
@@ -735,7 +738,8 @@ HÀNH ĐỘNG NGAY: Đọc dữ liệu công cụ trả về, tạo bảng Markd
                     user_id=user_id or "default",
                     session_id=session_id or "default",
                     use_rag=use_rag,
-                    tools_enabled=allow_tools
+                    tools_enabled=allow_tools,
+                    observer_callback=observer_callback
                 )
             
             # ========== PHASE 3: EXTRACT AND RETURN ANSWER ==========

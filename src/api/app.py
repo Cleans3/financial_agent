@@ -2,6 +2,12 @@
 FastAPI Application with Authentication & Database Integration
 """
 
+# Fix Unicode encoding issues on Windows (for vnstock emoji output)
+import sys
+import os
+if sys.platform == 'win32':
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -46,7 +52,11 @@ from ..core.workflow_step_streaming import (
     WORKFLOW_NODE_MAPPING
 )
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    encoding='utf-8'
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -870,6 +880,33 @@ async def chat_stream(
             
             logger.info(f"[STREAM] Will emit {len(step_order)} workflow steps in parallel with agent execution")
             
+            # Create queue for real-time observer events from workflow
+            observer_queue = asyncio.Queue()
+            
+            async def observer_callback(step):
+                """Called by workflow observer when step status changes"""
+                try:
+                    # Only queue COMPLETED events to avoid duplicate steps in frontend
+                    # "started" events are informational but create duplicate display
+                    if step.status.value != "completed":
+                        logger.info(f"[OBSERVER:CALLBACK] Received step {step.step_number}: {step.node_name} (status: {step.status.value}) - skipping non-completed event")
+                        return
+                    
+                    logger.info(f"[OBSERVER:CALLBACK] Received step event: {step.node_name} (step {step.step_number}, status: {step.status.value})")
+                    event = {
+                        "type": "observer_step",
+                        "node_name": step.node_name,
+                        "status": step.status.value,
+                        "duration_ms": int((step.duration or 0) * 1000),
+                        "step_number": step.step_number,
+                        "metadata": step.metadata
+                    }
+                    logger.info(f"[OBSERVER:CALLBACK] Queuing event for step {step.step_number}")
+                    await observer_queue.put(event)
+                    logger.info(f"[OBSERVER:CALLBACK] Successfully queued event for step {step.step_number}. Queue size: {observer_queue.qsize()}")
+                except Exception as e:
+                    logger.error(f"[OBSERVER:CALLBACK] Failed to queue observer event: {e}", exc_info=True)
+            
             # Start agent processing in background
             agent_instance = get_agent()
             agent_task = asyncio.create_task(
@@ -880,59 +917,61 @@ async def chat_stream(
                     conversation_history=conversation_history,
                     uploaded_files=uploaded_files_info,
                     allow_tools=request.allow_tools,
-                    use_rag=use_rag
+                    use_rag=use_rag,
+                    observer_callback=observer_callback
                 )
             )
             
-            # Emit steps on timeline synchronized with agent execution
-            # Spread steps across estimated execution time
+            # Stream real observer events from workflow in real-time
+            # These are actual step transitions from the workflow, not synthetic timing
             workflow_start = time.time()
-            step_count = len(step_order)
-            last_step_time = workflow_start
             
-            for idx, step_name in enumerate(step_order):
-                # Calculate when this step should complete
-                # Spread steps evenly across agent execution time
-                # Each step completes at: (step_number / total_steps) of elapsed time
-                progress_ratio = (idx + 1) / step_count
+            async def stream_observer_events():
+                """Stream real-time observer events from workflow"""
+                while not agent_task.done():
+                    try:
+                        # Try to get an observer event (with timeout)
+                        event = await asyncio.wait_for(
+                            observer_queue.get(),
+                            timeout=0.1  # Check every 100ms
+                        )
+                        # Emit the real observer event
+                        logger.info(f"[STREAM:REAL] Emitting step {event['step_number']}: {event['node_name']} ({event['duration_ms']}ms, status: {event['status']})")
+                        yield event
+                    except asyncio.TimeoutError:
+                        # No event yet, check if agent is done
+                        if agent_task.done():
+                            break
+                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        logger.error(f"[STREAM:ERROR] Error streaming observer events: {e}", exc_info=True)
+                        await asyncio.sleep(0.05)
                 
-                # Wait until it's time to emit this step
-                # This synchronizes step emissions with estimated agent completion
-                target_elapsed = 0.5 + (idx * 0.3)  # Start after 500ms, then add 300ms per step
-                
-                while True:
-                    elapsed = time.time() - workflow_start
-                    if elapsed >= target_elapsed or agent_task.done():
+                # Drain any remaining events after agent completes
+                logger.info(f"[STREAM:REAL] Agent task done, checking for remaining events in queue...")
+                while not observer_queue.empty():
+                    try:
+                        event = observer_queue.get_nowait()
+                        logger.info(f"[STREAM:REAL] Emitting final step {event['step_number']}: {event['node_name']}")
+                        yield event
+                    except asyncio.QueueEmpty:
                         break
-                    await asyncio.sleep(0.05)  # Check every 50ms
-                
-                # Calculate ACTUAL duration since last step (not hardcoded)
-                current_time = time.time()
-                actual_duration_ms = int((current_time - last_step_time) * 1000)
-                last_step_time = current_time
-                
-                # Create and emit step with REAL timing
-                step = create_workflow_step(
-                    node_name=step_name,
-                    status=STEP_STATUS_COMPLETED,
-                    result=f"{step_name} completed",
-                    metadata={"order": idx + 1, "total_steps": step_count},
-                    duration=actual_duration_ms
-                )
-                all_workflow_steps.append(step)
-                
-                yield f'data: {json.dumps({"type": "workflow_step", "step": step})}\n\n'
-                logger.debug(f"[STREAM] Step {idx + 1}/{step_count}: {step_name} ({actual_duration_ms}ms)")
+            
+            # Stream observer events
+            async for event in stream_observer_events():
+                # Emit observer event directly (real timing from workflow)
+                yield f'data: {json.dumps(event)}\n\n'
+                all_workflow_steps.append(event)
             
             # Wait for agent to actually complete
             answer, thinking_steps = await agent_task
             workflow_duration = time.time() - workflow_start
             logger.info(f"[STREAM] Agent + workflow completed in {workflow_duration:.2f}s")
+            logger.info(f"[STREAM] Returned {len(thinking_steps)} legacy thinking_steps, but observer emitted {len(all_workflow_steps)} real steps")
             
-            # Stream each thinking step as it was calculated (legacy support)
-            for step in thinking_steps:
-                yield f'data: {json.dumps({"type": "thinking_step", "step": step})}\n\n'
-                await asyncio.sleep(0.1)  # Small delay for better UX
+            # NOTE: Do NOT emit old thinking_steps after real observer steps 
+            # The observer events are the source of truth for workflow step timing/state
+            # The thinking_steps returned from aquery are generic/legacy steps that would overwrite the real ones
             
             # Save messages to database
             user_msg = ChatMessage(

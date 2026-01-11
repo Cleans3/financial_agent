@@ -56,6 +56,7 @@ class SummaryToolsProvider:
             categories = {}
             insights = []
             summary_parts = []
+            metric_metadata = {}  # Preserve full metadata for each metric
             
             for chunk in metric_chunks:
                 metric_type = chunk.get('metric_type', 'other')
@@ -74,6 +75,14 @@ class SummaryToolsProvider:
                 if len(categories[metric_type]["facts"]) < 2:
                     categories[metric_type]["facts"].append(text[:100])
                 insights.append(f"{metric_name}: {text[:80]}")
+                
+                # Preserve metadata
+                metric_metadata[metric_name] = {
+                    'type': metric_type,
+                    'confidence': chunk.get('confidence', 0.0),
+                    'relevance': chunk.get('relevance', 1.0),
+                    'chunk_id': chunk.get('id', '')
+                }
             
             # Build summary text
             for category, data in categories.items():
@@ -88,6 +97,7 @@ class SummaryToolsProvider:
                 "tool_name": "structured_data_summary",
                 "summary": summary_text,
                 "categories": categories,
+                "metric_metadata": metric_metadata,  # Include preserved metadata
                 "insights": insights[:10],  # Top 10 insights for reformulation
                 "total_metrics": len(metric_chunks),
                 "summary_tool_used": "structured_data_summary",
@@ -122,9 +132,11 @@ class SummaryToolsProvider:
             # Extract just essential information per metric
             condensed = {}
             insights = []
+            metric_metadata = {}  # Preserve metric type and other metadata
             
             for chunk in metric_chunks:
                 metric_name = chunk.get('metric_name') or 'unknown'
+                metric_type = chunk.get('metric_type', 'other')
                 text = chunk.get('text', '')
                 
                 # Keep only first sentence/key facts (no explanation)
@@ -133,6 +145,11 @@ class SummaryToolsProvider:
                     essential = essential[:150] + "..."
                 
                 condensed[metric_name] = essential
+                metric_metadata[metric_name] = {
+                    'type': metric_type,
+                    'confidence': chunk.get('confidence', 0.0),
+                    'relevance': chunk.get('relevance', 1.0)
+                }
                 insights.append(f"{metric_name}: {essential}")
             
             # Build condensed summary
@@ -146,6 +163,7 @@ class SummaryToolsProvider:
                 "tool_name": "metric_condensing",
                 "summary": summary_text,
                 "metrics": condensed,
+                "metric_metadata": metric_metadata,  # Include preserved metadata
                 "insights": insights[:10],  # Top 10 condensed metrics
                 "total_metrics": len(condensed),
                 "summary_tool_used": "metric_condensing",

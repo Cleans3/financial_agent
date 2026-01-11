@@ -6,6 +6,28 @@ import ThinkingSteps from "./ThinkingSteps";
 import DocumentPanel from "./DocumentPanel";
 import { conversationService } from "../services/conversationService";
 
+// Map node names to user-friendly descriptions
+const NODE_DESCRIPTIONS = {
+  'PROMPT_HANDLER': 'Processing user input',
+  'FILE_HANDLER': 'Handling uploaded files',
+  'CLASSIFY': 'Analyzing query type',
+  'DIRECT_RESPONSE': 'Generating direct response',
+  'EXTRACT_FILE': 'Extracting file content',
+  'INGEST_FILE': 'Storing in knowledge base',
+  'REWRITE_EVAL': 'Evaluating query',
+  'REWRITE_FILE': 'Adding file context',
+  'REWRITE_CONVO': 'Adding conversation context',
+  'RETRIEVE': 'Searching knowledge base',
+  'FILTER': 'Ranking results',
+  'ANALYZE': 'Analyzing data types',
+  'SELECT_TOOLS': 'Selecting tools',
+  'EXECUTE_TOOLS': 'Running tools',
+  'SUMMARY_TOOLS': 'Summarizing results',
+  'QUERY_REFORMULATION': 'Building context',
+  'FORMAT_OUTPUT': 'Formatting output',
+  'GENERATE': 'Generating response'
+};
+
 const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh, onAgentThinkingChange }) => {
   const [messages, setMessages] = useState([
     {
@@ -134,12 +156,47 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh,
             try {
               const data = JSON.parse(line.slice(6));
               
-              // NEW: Handle workflow steps (high-detail phase tracking)
-              if (data.type === "workflow_step") {
+              // Handle observer steps (real-time workflow progress from backend)
+              if (data.type === "observer_step") {
+                const nodeName = data.node_name;
+                const stepNumber = data.step_number;
+                const stepId = `${nodeName}-${stepNumber}`;
+                
+                console.info(`[Observer] Step ${stepNumber}: ${nodeName} - ${data.status} (${data.duration_ms}ms)`);
+                
+                // Create or update step
+                setThinkingSteps((prev) => {
+                  // Check if step already exists
+                  const existingIndex = prev.findIndex(s => s.id === stepId);
+                  
+                  const stepData = {
+                    id: stepId,
+                    step_id: stepId,
+                    name: nodeName,
+                    title: `${stepNumber}. ${nodeName}`,
+                    description: NODE_DESCRIPTIONS[nodeName] || 'Processing...',
+                    status: data.status,
+                    duration: data.duration_ms,
+                    duration_ms: data.duration_ms,
+                    metadata: data.metadata || {}
+                  };
+                  
+                  if (existingIndex >= 0) {
+                    // Update existing step
+                    const updated = [...prev];
+                    updated[existingIndex] = { ...updated[existingIndex], ...stepData };
+                    return updated;
+                  } else {
+                    // Add new step
+                    return [...prev, stepData];
+                  }
+                });
+              }
+              // Handle workflow steps (legacy support)
+              else if (data.type === "workflow_step") {
                 const workflowStep = data.step;
                 workflowSteps.push(workflowStep);
                 setThinkingSteps((prev) => [...prev, workflowStep]);
-                // Log for debugging
                 console.debug(`[Workflow] ${workflowStep.id || 'unknown'} - ${workflowStep.status}`);
               }
               else if (data.type === "rag_status") {
@@ -152,7 +209,7 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh,
               } 
               else if (data.type === "answer") {
                 finalAnswer = data.content;
-                // NEW: Collect workflow steps from answer data if present
+                // Collect workflow steps from answer data if present
                 if (data.workflow_steps && Array.isArray(data.workflow_steps)) {
                   workflowSteps = data.workflow_steps;
                   console.debug(`[Answer] Received ${workflowSteps.length} workflow steps`);

@@ -1,6 +1,6 @@
 """
-LangGraphWorkflow V4 - Complete 13-node architecture
-Full workflow with parallel entry points, all routing, output formatting, and monitoring
+LangGraphWorkflow V4 - Complete 18-node architecture
+Full workflow with parallel entry points, classification, file handling, retrieval, RAG processing, tool execution, and monitoring
 """
 
 import asyncio
@@ -13,7 +13,6 @@ from .workflow_state import WorkflowState, PromptType, DataType, create_initial_
 from .prompt_classifier import PromptClassifier
 from .retrieval_manager import RetrievalManager
 from .result_filter import ResultFilter
-from .data_analyzer import DataAnalyzer
 from .query_rewriter import QueryRewriter
 from .tool_selector import ToolSelector
 from .output_formatter import OutputFormatter
@@ -26,27 +25,39 @@ logger = logging.getLogger(__name__)
 
 class LangGraphWorkflowV4:
     """
-    Complete 13-node workflow with full feature set:
+    Complete 14-node workflow architecture with full feature set:
     
-    Parallel Entry:
-    PROMPT_HANDLER → CLASSIFY → [DIRECT_RESPONSE | EXTRACT_FILE → INGEST_FILE → REWRITE_EVAL]
-    FILE_HANDLER → EXTRACT_FILE
+    Entry Layer (Step 1):
+    - PROMPT_HANDLER: Process and validate user input
+    - FILE_HANDLER: Handle uploaded files (parallel entry point)
     
-    Main Pipeline:
-    REWRITE_EVAL → [REWRITE_FILE|REWRITE_CONVO|RETRIEVE] → FILTER → ANALYZE → SELECT_TOOLS → 
-    GENERATE → [EXECUTE_TOOLS → FORMAT_OUTPUT | FORMAT_OUTPUT] → END
+    Classification & Routing (Step 2):
+    - CLASSIFY: Determine query type (chitchat, file, analysis, etc.)
+    - DIRECT_RESPONSE: Short-circuit for chitchat/greeting queries
     
-    Features:
-    - Prompt classification (5 types)
-    - File handling with extraction & ingestion
-    - Query rewriting (file + conversation context)
-    - Retrieval with personal-first + global fallback
-    - Result filtering with RRF
-    - Data type analysis
-    - Intelligent tool selection
-    - Tool execution
-    - Output formatting
-    - Workflow observation & monitoring
+    File Processing (Steps 3-4):
+    - EXTRACT_FILE: Parse PDF, Excel, images, documents
+    - INGEST_FILE: Chunk, embed, and store in vector DB
+    
+    Query Preparation (Step 5-7):
+    - REWRITE: Conditional query rewriting (file context, conversation history, or skip)
+    - RETRIEVE: Semantic + keyword search from vector DB
+    - FILTER: Deduplicate and rank results using RRF
+    
+    Analysis & Processing (Steps 8-9):
+    - SELECT_TOOLS: Choose relevant tools (vnstock, technical, etc.)
+    - SUMMARY_TOOLS: Apply summarization techniques (structured, metric condensing, etc.)
+    
+    Reformulation & Generation (Steps 10-13):
+    - QUERY_REFORMULATION: Build context for LLM (RAG + tools + analysis)
+    - EXECUTE_TOOLS: Run selected tools (if any)
+    - FORMAT_OUTPUT: Final output formatting
+    - GENERATE: LLM inference with full context
+    
+    Monitoring:
+    - Workflow observer tracks all 14 steps in real-time
+    - Each step emits started and completed events
+    - Frontend receives only completed events to avoid duplication
     """
     
     def __init__(self, agent_executor, enable_observer: bool = True):
@@ -60,7 +71,6 @@ class LangGraphWorkflowV4:
         self.rewriter = QueryRewriter(self.llm)
         self.retrieval = RetrievalManager(getattr(agent_executor, 'rag_service', None))
         self.filter = ResultFilter()
-        self.analyzer = DataAnalyzer(self.llm)
         self.tool_selector = ToolSelector()
         self.formatter = OutputFormatter()
         
@@ -76,31 +86,28 @@ class LangGraphWorkflowV4:
         self.observer = WorkflowObserver() if enable_observer else None
         
         self.graph = self._build_graph()
-        logger.info("LangGraphWorkflowV4 initialized with complete 13-node architecture + advanced retrieval/summarization")
+        logger.info("LangGraphWorkflowV4 initialized with 14-node architecture + advanced retrieval/summarization")
     
     def _build_graph(self) -> StateGraph:
-        """Build the complete 13-node workflow graph"""
+        """Build the complete 14-node workflow graph"""
         workflow = StateGraph(WorkflowState)
         
-        # Add all 14 nodes (13 original + 1 reformulation)
+        # Add all 14 nodes
         workflow.add_node("prompt_handler", self.node_prompt_handler)
         workflow.add_node("file_handler", self.node_file_handler)
         workflow.add_node("classify", self.node_classify)
         workflow.add_node("direct_response", self.node_direct_response)
         workflow.add_node("extract_file", self.node_extract_file)
         workflow.add_node("ingest_file", self.node_ingest_file)
-        workflow.add_node("rewrite_eval", self.node_rewrite_eval)
-        workflow.add_node("rewrite_file", self.node_rewrite_file_context)
-        workflow.add_node("rewrite_convo", self.node_rewrite_conversation_context)
+        workflow.add_node("rewrite", self.node_rewrite)
         workflow.add_node("retrieve", self.node_retrieve)
         workflow.add_node("filter", self.node_filter)
         workflow.add_node("summary_tools", self.node_summary_tools)
         workflow.add_node("query_reformulation", self.node_query_reformulation)
-        workflow.add_node("analyze", self.node_analyze)
         workflow.add_node("select_tools", self.node_select_tools)
-        workflow.add_node("generate", self.node_generate)
         workflow.add_node("execute_tools", self.node_execute_tools)
         workflow.add_node("format_output", self.node_format_output)
+        workflow.add_node("generate", self.node_generate)
         
         # Parallel entry points
         workflow.set_entry_point("prompt_handler")
@@ -122,12 +129,12 @@ class LangGraphWorkflowV4:
         workflow.add_conditional_edges(
             "classify",
             lambda s: "direct_response" if s.get("is_chitchat") else (
-                "extract_file" if s.get("uploaded_files") else "rewrite_eval"
+                "extract_file" if s.get("uploaded_files") else "rewrite"
             ),
             {
                 "direct_response": "direct_response",
                 "extract_file": "extract_file",
-                "rewrite_eval": "rewrite_eval"
+                "rewrite": "rewrite"
             }
         )
         
@@ -136,29 +143,16 @@ class LangGraphWorkflowV4:
         
         # File pipeline
         workflow.add_edge("extract_file", "ingest_file")
-        workflow.add_edge("ingest_file", "rewrite_eval")
+        workflow.add_edge("ingest_file", "rewrite")
         
-        # REWRITE_EVAL routes to appropriate rewriting strategy
-        workflow.add_conditional_edges(
-            "rewrite_eval",
-            self._route_rewrite_strategy,
-            {
-                "rewrite_file": "rewrite_file",
-                "rewrite_convo": "rewrite_convo",
-                "retrieve": "retrieve"
-            }
-        )
-        
-        # Rewrite paths converge to RETRIEVE
-        workflow.add_edge("rewrite_file", "retrieve")
-        workflow.add_edge("rewrite_convo", "retrieve")
+        # REWRITE → RETRIEVE (consolidated rewrite logic)
+        workflow.add_edge("rewrite", "retrieve")
         
         # Main retrieval pipeline
         workflow.add_edge("retrieve", "filter")
-        workflow.add_edge("filter", "analyze")
         
-        # ANALYZE → SELECT_TOOLS (analyze data types to decide which tools to use)
-        workflow.add_edge("analyze", "select_tools")
+        # FILTER → SELECT_TOOLS
+        workflow.add_edge("filter", "select_tools")
         
         # SELECT_TOOLS → EXECUTE_TOOLS (execute selected tools immediately)
         workflow.add_edge("select_tools", "execute_tools")
@@ -179,19 +173,6 @@ class LangGraphWorkflowV4:
         workflow.add_edge("generate", END)
         
         return workflow.compile()
-    
-    def _route_rewrite_strategy(self, state: WorkflowState) -> str:
-        """Route to appropriate rewrite strategy"""
-        if not state.get("needs_rewrite", False):
-            return "retrieve"
-        
-        context_type = state.get("rewrite_context_type", "")
-        if context_type == "file":
-            return "rewrite_file"
-        elif context_type == "conversation":
-            return "rewrite_convo"
-        
-        return "retrieve"
     
     # ========== Node Implementations ==========
     
@@ -309,7 +290,7 @@ class LangGraphWorkflowV4:
                 logger.info(f"   (Reformulation will NOT happen!)")
             else:
                 logger.info(f"✅ ROUTING: This query will go through normal pipeline")
-                logger.info(f"   (Will include: rewrite → retrieve → filter → analyze → select_tools → execute_tools → query_reformulation → format_output → generate)")
+                logger.info(f"   (Will include: rewrite → retrieve → filter → select_tools → execute_tools → query_reformulation → format_output → generate)")
             logger.info(f"─" * 80)
             logger.info(f"")
         except Exception as e:
@@ -727,106 +708,79 @@ Nếu là câu hỏi khác, hãy trả lời thân thiện và gợi ý người
         
         return state
     
-    async def node_rewrite_eval(self, state: WorkflowState) -> Dict[str, Any]:
-        """Evaluate whether query needs rewriting"""
+    async def node_rewrite(self, state: WorkflowState) -> Dict[str, Any]:
+        """
+        Conditional query rewriting with intelligent strategy selection.
+        
+        Automatically determines and applies the best rewriting strategy:
+        1. FILE CONTEXT: If files are uploaded, add file metadata to query
+        2. CONVERSATION CONTEXT: If conversation history exists, add relevant history
+        3. NO REWRITING: If neither applies, use original query
+        
+        This consolidated node replaces three separate nodes (rewrite_eval, rewrite_file, rewrite_convo)
+        for better clarity and efficiency.
+        """
         try:
             if self.observer:
-                state["_step"] = await self.observer.emit_step_started("REWRITE_EVAL")
+                state["_step"] = await self.observer.emit_step_started("REWRITE")
             
             prompt = state.get("user_prompt", "")
-            has_files = bool(state.get("uploaded_files"))
+            file_metadata = state.get("file_metadata", [])
             history = state.get("conversation_history", [])
             
-            needs_rewrite = await self.rewriter.evaluate_need_for_rewriting(
-                prompt, has_files, history
-            )
+            rewritten_prompt = prompt
+            rewrite_strategy = "none"
             
-            state["needs_rewrite"] = needs_rewrite
+            # Strategy 1: Rewrite with file context (highest priority)
+            if file_metadata:
+                try:
+                    rewritten_prompt = await self.rewriter.rewrite_with_file_context(
+                        prompt, file_metadata
+                    )
+                    rewrite_strategy = "file"
+                    logger.info(f"Applied file context rewriting strategy")
+                except Exception as e:
+                    logger.warning(f"File context rewriting failed, keeping original: {e}")
+                    rewrite_strategy = "file_failed"
             
-            if needs_rewrite:
-                if has_files and state.get("file_metadata"):
-                    state["rewrite_context_type"] = "file"
-                elif history:
-                    state["rewrite_context_type"] = "conversation"
-                else:
-                    needs_rewrite = False
+            # Strategy 2: Rewrite with conversation context (fallback)
+            elif history:
+                try:
+                    rewritten_prompt = await self.rewriter.rewrite_with_conversation_context(
+                        prompt, history
+                    )
+                    rewrite_strategy = "conversation"
+                    logger.info(f"Applied conversation context rewriting strategy")
+                except Exception as e:
+                    logger.warning(f"Conversation rewriting failed, keeping original: {e}")
+                    rewrite_strategy = "conversation_failed"
             
-            state["needs_rewrite"] = needs_rewrite
+            # Strategy 3: No rewriting needed
+            else:
+                rewrite_strategy = "none"
+                logger.info(f"No context available for rewriting, using original query")
+            
+            state["rewritten_prompt"] = rewritten_prompt
+            state["rewrite_strategy"] = rewrite_strategy
             
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_completed(
                     state["_step"],
-                    metadata={"needs_rewrite": needs_rewrite}
+                    output_size=len(rewritten_prompt),
+                    metadata={
+                        "strategy": rewrite_strategy,
+                        "has_files": bool(file_metadata),
+                        "has_history": bool(history),
+                        "prompt_changed": rewritten_prompt != prompt
+                    }
                 )
             
-            logger.info(f"Rewrite evaluation: {needs_rewrite}")
-        except Exception as e:
-            logger.error(f"Rewrite evaluation failed: {e}")
-            state["needs_rewrite"] = False
-            if self.observer and state.get("_step"):
-                await self.observer.emit_step_failed(state["_step"], str(e))
+            logger.info(f"Rewrite strategy: {rewrite_strategy} | Changed: {rewritten_prompt != prompt}")
         
-        return state
-    
-    async def node_rewrite_file_context(self, state: WorkflowState) -> Dict[str, Any]:
-        """Rewrite query using file context"""
-        try:
-            if self.observer:
-                state["_step"] = await self.observer.emit_step_started("REWRITE_FILE")
-            
-            prompt = state.get("user_prompt", "")
-            file_metadata = state.get("file_metadata", [])
-            
-            if file_metadata:
-                rewritten = await self.rewriter.rewrite_with_file_context(prompt, file_metadata)
-                state["rewritten_prompt"] = rewritten
-                
-                if self.observer and state.get("_step"):
-                    await self.observer.emit_step_completed(
-                        state["_step"],
-                        output_size=len(rewritten)
-                    )
-            else:
-                state["rewritten_prompt"] = prompt
-                if self.observer and state.get("_step"):
-                    await self.observer.emit_step_skipped(
-                        "REWRITE_FILE", "No file metadata"
-                    )
         except Exception as e:
-            logger.error(f"File context rewriting failed: {e}")
-            state["rewritten_prompt"] = prompt
-            if self.observer and state.get("_step"):
-                await self.observer.emit_step_failed(state["_step"], str(e))
-        
-        return state
-    
-    async def node_rewrite_conversation_context(self, state: WorkflowState) -> Dict[str, Any]:
-        """Rewrite query using conversation context"""
-        try:
-            if self.observer:
-                state["_step"] = await self.observer.emit_step_started("REWRITE_CONVO")
-            
-            prompt = state.get("user_prompt", "")
-            history = state.get("conversation_history", [])
-            
-            if history:
-                rewritten = await self.rewriter.rewrite_with_conversation_context(prompt, history)
-                state["rewritten_prompt"] = rewritten
-                
-                if self.observer and state.get("_step"):
-                    await self.observer.emit_step_completed(
-                        state["_step"],
-                        output_size=len(rewritten)
-                    )
-            else:
-                state["rewritten_prompt"] = prompt
-                if self.observer and state.get("_step"):
-                    await self.observer.emit_step_skipped(
-                        "REWRITE_CONVO", "No conversation history"
-                    )
-        except Exception as e:
-            logger.error(f"Conversation context rewriting failed: {e}")
-            state["rewritten_prompt"] = prompt
+            logger.error(f"Rewrite node failed: {e}")
+            state["rewritten_prompt"] = state.get("user_prompt", "")
+            state["rewrite_strategy"] = "error"
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_failed(state["_step"], str(e))
         
@@ -1528,7 +1482,7 @@ constraint_listing, feasibility_check) - nothing else."""
                 
                 # Add metric chunks with instructions
                 if metric_chunks:
-                    reformulation_parts.append("CÁC CHỈ SỐ TÓIỂU (HÃY TÓIỂU HÓA VÀ THÊM VÀO CÂU TRẢ LỜI NẾU CÓ NGHĨA):")
+                    reformulation_parts.append("CÁC CHỈ SỐ TÓM TẮT (HÃY TÓM TẮT VÀ THÊM VÀO CÂU TRẢ LỜI NẾU CÓ NGHĨA):")
                     reformulation_parts.append("Các chỉ số sau cần được tóm tắt. Hãy:")
                     reformulation_parts.append("1. Tóm tắt từng chỉ số")
                     reformulation_parts.append("2. Thêm vào câu trả lời nếu nó có liên quan và có ý nghĩa")
@@ -1580,7 +1534,7 @@ constraint_listing, feasibility_check) - nothing else."""
                 
                 # Second: Metric chunks with clear instructions
                 if metric_chunks:
-                    reformulation_parts.append("CÁC CHỈ SỐ (HÃY TÓIỂU HÓA VÀ THÊM VÀO CÂU TRẢ LỜI NẾU CÓ NGHĨA):")
+                    reformulation_parts.append("CÁC CHỈ SỐ (HÃY TÓM TẮT VÀ THÊM VÀO CÂU TRẢ LỜI NẾU CÓ NGHĨA):")
                     reformulation_parts.append("Các chỉ số sau cần được tóm tắt. Hãy:")
                     reformulation_parts.append("1. Tóm tắt từng chỉ số")
                     reformulation_parts.append("2. Thêm vào câu trả lời nếu nó có liên quan và có ý nghĩa")
@@ -1685,49 +1639,6 @@ constraint_listing, feasibility_check) - nothing else."""
             logger.error(f"Query reformulation failed: {e}", exc_info=True)
             state["reformulated_query"] = state.get("user_prompt", "")
             state["reformulation_context"] = ""
-            if self.observer and state.get("_step"):
-                await self.observer.emit_step_failed(state["_step"], str(e))
-        
-        return state
-    
-    async def node_analyze(self, state: WorkflowState) -> Dict[str, Any]:
-        """Analyze detected data types"""
-        try:
-            separator = "═" * 80
-            logger.info("")
-            logger.info(separator)
-            logger.info("DATA ANALYSIS NODE START")
-            logger.info(separator)
-            
-            if self.observer:
-                state["_step"] = await self.observer.emit_step_started("ANALYZE")
-            
-            analysis = await self.analyzer.analyze_results(state.get("best_search_results", []))
-            
-            state["has_table_data"] = analysis.get("has_table_data", False)
-            state["has_numeric_data"] = analysis.get("has_numeric_data", False)
-            state["text_only"] = analysis.get("text_only", True)
-            state["detected_data_types"] = analysis.get("detected_types", [])
-            
-            logger.info(f"Data types detected:")
-            logger.info(f"  Table data: {state['has_table_data']}")
-            logger.info(f"  Numeric data: {state['has_numeric_data']}")
-            logger.info(f"  Types: {state['detected_data_types']}")
-            
-            if self.observer and state.get("_step"):
-                await self.observer.emit_step_completed(
-                    state["_step"],
-                    metadata={
-                        "has_table": state["has_table_data"],
-                        "has_numeric": state["has_numeric_data"],
-                        "types": state["detected_data_types"]
-                    }
-                )
-            
-            logger.info(separator)
-        except Exception as e:
-            logger.error(f"✗ Analysis failed: {e}")
-            state["text_only"] = True
             if self.observer and state.get("_step"):
                 await self.observer.emit_step_failed(state["_step"], str(e))
         
@@ -2078,60 +1989,71 @@ Your response (tool names only, nothing else):""")
                 logger.info(f"File uploaded without specific query - providing guidance")
             else:
                 # System prompt for financial advisor
-                system_prompt = """Bạn là một chuyên gia tư vấn tài chính chuyên về thị trường chứng khoán Việt Nam.
+                system_prompt = """Bạn là một chuyên gia tư vấn tài chính chuyên về thị trường chứng khoán Việt Nam. Bạn có kinh nghiệm phân tích sâu, hiểu rõ các chỉ số tài chính, và có khả năng liên kết thông tin để đưa ra những nhận định sáng suốt.
 
 NHIỆM VỤ:
-- Trả lời các câu hỏi về thị trường chứng khoán Việt Nam một cách chính xác, chi tiết
-- Phân tích dữ liệu giá cổ phiếu và các chỉ số kỹ thuật
-- Cung cấp thông tin về các công ty niêm yết
-- Giải thích ý nghĩa của các chỉ số cho người không chuyên
+- Trả lời các câu hỏi tài chính một cách chính xác, chi tiết nhưng dễ hiểu
+- Phân tích và giải thích ý nghĩa của dữ liệu, không chỉ trình bày thô các con số
+- Liên kết các chỉ số khác nhau để tạo ra bức tranh toàn cảnh
+- Cung cấp thông tin hữu ích giúp người dùng hiểu rõ hơn về tình hình tài chính
 
-QUY TẮC TRẢ LỜI:
+HƯỚNG DẪN TRẢ LỜI:
 
-1. ĐỊNH DẠNG:
-   - Trả lời bằng tiếng Việt
-   - QUAN TRỌNG: Không tự giới thiệu tên riêng hoặc danh xưng cá nhân
-   - Hiển thị dữ liệu chi tiết dưới dạng BẢNG MARKDOWN khi có dữ liệu
-   - Sau bảng: Đưa ra nhận xét tổng quan và kết luận
+1. PHONG CÁCH:
+   - Trả lời bằng tiếng Việt, tự nhiên và chuyên nghiệp
+   - Sử dụng dữ liệu cụ thể để hỗ trợ các phân tích của bạn
+   - Khi có dữ liệu bảng hoặc danh sách, hiển thị dưới dạng BẢNG MARKDOWN để dễ đọc
+   - QUAN TRỌNG: Đây là dữ liệu tham khảo - hãy diễn giải, phân tích và rút ra kết luận của riêng bạn chứ không phải chỉ nhắc lại số liệu
 
-2. QUY TẮC FORMAT BẢNG:
-   - Dữ liệu giá lịch sử (OHLCV): | Ngày | Giá mở cửa | Giá cao nhất | Giá thấp nhất | Giá đóng cửa | Khối lượng |
-   - SMA/RSI: | Ngày | Giá đóng cửa | SMA-X | Chênh lệch | Xu hướng |
-   - Cổ đông: | STT | Tên cổ đông | Số lượng CP | Tỷ lệ sở hữu (%) |
-   - Ban lãnh đạo: | STT | Họ tên | Chức vụ | Tỷ lệ sở hữu (%) |
-   - Sự kiện: | Ngày | Loại sự kiện | Nội dung | Tỷ lệ/Giá trị |
+2. CÁCH TIẾP CẬN:
+   - Bắt đầu với câu trả lời chính, sau đó cung cấp chi tiết hỗ trợ
+   - Nếu dữ liệu phức tạp, đầu tiên tóm tắt điểm chính, sau đó cung cấp bảng chi tiết
+   - Kết thúc bằng phân tích tổng hợp hoặc gợi ý dựa trên các thông tin đã cung cấp
+   - Được phép bổ sung kiến thức chuyên gia của bạn để làm cho câu trả lời sâu sắc hơn
 
-3. GIẢI THÍCH CHỈ SỐ:
-   - SMA: Giá > SMA = xu hướng tăng, Giá < SMA = xu hướng giảm
-   - RSI > 70: Quá mua (có thể giảm), RSI < 30: Quá bán (có thể tăng)
-   - Luôn giải thích ý nghĩa cho người không chuyên
+3. DIỄN GIẢI CHỈ SỐ:
+   - Giải thích những gì các chỉ số có ý nghĩa (ví dụ: SMA, RSI, P/E ratio)
+   - Liên kết các chỉ số để xác định xu hướng hoặc cơ hội
+   - Cung cấp bối cảnh để giúp người dùng hiểu ý nghĩa thực tế
 
-4. XỬ LÝ LỖI:
-   - Nếu dữ liệu không tìm thấy, giải thích rõ lý do
-   - Gợi ý cách sửa nếu có thể
-   - Hướng dẫn người dùng kiểm tra lại thông tin đầu vào"""
+4. XỬ LÝ DỮ LIỆU THIẾU:
+   - Nếu dữ liệu không tìm thấy, giải thích lý do rõ ràng
+   - Gợi ý những cách sửa hoặc điều chỉnh để lấy được thông tin cần thiết
+   - Có thể đưa ra phân tích dựa trên dữ liệu liên quan nếu có"""
                 
                 # Ensure system_prompt doesn't have unmatched braces for LangChain template parsing
                 # Replace any literal braces with escaped versions for template safety
                 system_prompt = system_prompt.replace("{", "{{").replace("}", "}}")
                 
                 # Build prompt with formatted data
-                user_prompt_content = f"""Câu hỏi: {query}"""
+                # Clearly separate question from context to give LLM freedom to synthesize
+                user_prompt_content = f"""Câu hỏi của người dùng: {query}
+
+---THÔNG TIN THAM KHẢO---
+
+"""
                 
                 if formatted_output:
                     logger.info(f"Including formatted output in prompt ({len(formatted_output)} chars)")
-                    user_prompt_content += f"""
+                    user_prompt_content += f"""{formatted_output}
 
-Dữ liệu đã được xử lý và định dạng:
-{formatted_output}"""
+"""
                 
                 if tool_results and not formatted_output:
                     logger.info(f"Including raw tool results ({len(tool_results)} tools)")
                     for tool_name, result in tool_results.items():
-                        user_prompt_content += f"""
+                        user_prompt_content += f"""Từ công cụ '{tool_name}':
+{result}
 
-Kết quả từ công cụ '{tool_name}':
-{result}"""
+"""
+                
+                user_prompt_content += """---HẾT THÔNG TIN---
+
+Dựa trên thông tin tham khảo ở trên, hãy:
+1. Trả lời trực tiếp câu hỏi của người dùng
+2. Giải thích và phân tích các con số, không chỉ trình bày thô dữ liệu
+3. Đưa ra nhận định cá nhân và kết luận sáng suốt
+4. Tự do diễn giải, liên kết thông tin, và bổ sung kiến thức chuyên gia của bạn để giúp người dùng hiểu rõ hơn"""
                 
                 logger.info(f"Generating answer with prompt ({len(user_prompt_content)} chars)...")
                 
@@ -2231,8 +2153,9 @@ Kết quả từ công cụ '{tool_name}':
 Extract parameters for the tool '{tool_name}' with the following fields:
 {chr(10).join([f"- {field_name}: {field_info.description or 'required'}" for field_name, field_info in schema_fields.items()])}
 
-Return a JSON object with the extracted parameters."""
+Return ONLY a JSON object with the extracted parameters, no other text."""
                         
+                        params = None
                         try:
                             # Call LLM to extract parameters
                             llm_response = await asyncio.to_thread(
@@ -2246,18 +2169,30 @@ Return a JSON object with the extracted parameters."""
                             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
                             if json_match:
                                 params = json.loads(json_match.group())
-                                # Call tool with extracted parameters
+                        except Exception as e:
+                            logger.debug(f"  LLM parameter extraction error: {e}")
+                            params = None
+                        
+                        # If LLM extraction failed, try smart fallback extraction
+                        if params is None:
+                            logger.warning(f"  Parameter extraction failed, using fallback extraction")
+                            params = self._extract_parameters_fallback(query, tool_name, schema_fields)
+                        
+                        # Call tool with extracted parameters
+                        if params:
+                            try:
                                 if hasattr(tool, 'invoke'):
                                     result = await asyncio.to_thread(tool.invoke, params)
                                 elif hasattr(tool, 'func') and callable(tool.func):
                                     result = await asyncio.to_thread(tool.func, **params)
                                 else:
                                     result = await asyncio.to_thread(tool, **params)
-                            else:
-                                result = await asyncio.to_thread(tool.invoke, {"input": query})
-                        except Exception as e:
-                            logger.warning(f"  Parameter extraction failed, using direct call")
-                            result = await asyncio.to_thread(tool.invoke, {"input": query})
+                            except Exception as e:
+                                logger.error(f"  ✗ {tool_name} exception: {e}")
+                                result = None
+                        else:
+                            logger.warning(f"  Could not extract parameters for {tool_name}")
+                            result = None
                     else:
                         # No structured schema, call directly with query
                         if hasattr(tool, 'func') and callable(tool.func):
@@ -2363,10 +2298,113 @@ Return a JSON object with the extracted parameters."""
         
         return state
     
+    def _extract_parameters_fallback(self, query: str, tool_name: str, schema_fields: Dict) -> Optional[Dict[str, Any]]:
+        """
+        Fallback parameter extraction when LLM extraction fails.
+        Intelligently extracts parameters from query text using pattern matching and heuristics.
+        Handles Vietnamese and English inputs, stock tickers, numbers, and dates.
+        """
+        import re
+        params = {}
+        
+        # Normalize query for easier matching
+        query_lower = query.lower()
+        query_normalized = query.replace("tính", "").replace("cho", "").replace("của", "")
+        
+        logger.debug(f"[FALLBACK] Attempting to extract parameters for {tool_name}")
+        logger.debug(f"[FALLBACK] Query: {query}")
+        
+        # List of required fields from schema
+        required_fields = [
+            field_name for field_name, field_info in schema_fields.items()
+            if field_info.is_required()
+        ]
+        
+        try:
+            # ==== EXTRACT TICKER (common for all technical tools) ====
+            if 'ticker' in schema_fields:
+                # Pattern 1: Explicit Vietnamese phrases - "cho HPG", "của TCB"
+                ticker_match = re.search(r'(?:cho|của|từ|mã)\s+([A-Z]{1,5})\b', query)
+                
+                # Pattern 2: Standalone uppercase letters (likely ticker)
+                if not ticker_match:
+                    ticker_match = re.search(r'\b([A-Z]{2,5})\b', query)
+                
+                # Pattern 3: Last uppercase sequence in query
+                if not ticker_match:
+                    uppercase_matches = re.findall(r'\b([A-Z]{2,5})\b', query)
+                    if uppercase_matches:
+                        # Take the first or most relevant one
+                        ticker_match = type('obj', (object,), {'group': lambda self, x: uppercase_matches[0]})()
+                
+                if ticker_match:
+                    ticker = ticker_match.group(1) if ticker_match.lastindex else ticker_match.group()
+                    params['ticker'] = ticker.upper().strip()
+                    logger.debug(f"[FALLBACK] Extracted ticker: {params['ticker']}")
+            
+            # ==== EXTRACT WINDOW/PERIOD ====
+            if 'window' in schema_fields:
+                # Pattern: Numbers followed by day/period keywords
+                window_match = re.search(r'(\d{1,3})\s*(?:ngày|day|period|SMA-|RSI-)', query)
+                if window_match:
+                    window = int(window_match.group(1))
+                    if 1 <= window <= 200:  # Reasonable range for technical indicators
+                        params['window'] = window
+                        logger.debug(f"[FALLBACK] Extracted window: {window}")
+                
+                # If not found, try extracting from common SMA patterns like "SMA20"
+                if 'window' not in params:
+                    sma_match = re.search(r'SMA-?(\d+)', query)
+                    if sma_match:
+                        window = int(sma_match.group(1))
+                        if 1 <= window <= 200:
+                            params['window'] = window
+                            logger.debug(f"[FALLBACK] Extracted window from SMA pattern: {window}")
+            
+            # ==== EXTRACT DATE PARAMETERS ====
+            # Pattern for YYYY-MM-DD dates
+            date_pattern = r'(\d{4}-\d{2}-\d{2})'
+            dates = re.findall(date_pattern, query)
+            
+            if 'start_date' in schema_fields and len(dates) > 0:
+                params['start_date'] = dates[0]
+                logger.debug(f"[FALLBACK] Extracted start_date: {dates[0]}")
+            
+            if 'end_date' in schema_fields and len(dates) > 1:
+                params['end_date'] = dates[1]
+                logger.debug(f"[FALLBACK] Extracted end_date: {dates[1]}")
+            
+            # ==== EXTRACT TIMEFRAME ====
+            if 'timeframe' in schema_fields:
+                timeframe_match = re.search(r'(D|H|1m|5m|15m|30m|1h|4h|daily|hourly)', query, re.IGNORECASE)
+                if timeframe_match:
+                    timeframe = timeframe_match.group(1).upper()
+                    valid_timeframes = ['D', 'H', '1m', '5m', '15m', '30m', '1h', '4h']
+                    if timeframe in valid_timeframes:
+                        params['timeframe'] = timeframe
+                        logger.debug(f"[FALLBACK] Extracted timeframe: {timeframe}")
+            
+            # ==== VALIDATE REQUIRED FIELDS ====
+            missing_fields = [f for f in required_fields if f not in params]
+            
+            if missing_fields:
+                logger.warning(f"[FALLBACK] Missing required fields: {missing_fields}")
+                if 'ticker' in missing_fields:
+                    # Ticker extraction failed - can't proceed
+                    logger.error(f"[FALLBACK] Could not extract required 'ticker' field")
+                    return None
+            
+            logger.info(f"[FALLBACK] Successfully extracted parameters: {params}")
+            return params
+        
+        except Exception as e:
+            logger.error(f"[FALLBACK] Parameter extraction error: {e}")
+            return None
+    
     async def invoke(self, user_prompt: str, uploaded_files: list = None, 
                      conversation_history: list = None, user_id: str = "default",
                      session_id: str = "default", use_rag: bool = True,
-                     tools_enabled: bool = True) -> Dict[str, Any]:
+                     tools_enabled: bool = True, observer_callback: callable = None) -> Dict[str, Any]:
         """
         Invoke the V4 workflow with given parameters.
         
@@ -2390,6 +2428,27 @@ Return a JSON object with the extracted parameters."""
             logger.info(f"[WORKFLOW]   - uploaded_files length: {len(uploaded_files) if uploaded_files else 0}")
             if uploaded_files:
                 logger.info(f"[WORKFLOW]   - uploaded_files: {[f.get('name', 'unknown') if isinstance(f, dict) else str(f) for f in uploaded_files]}")
+            
+            # Reset observer for this invocation
+            if self.observer:
+                self.observer.reset()
+            
+            # Register observer callback if provided
+            logger.info(f"[WORKFLOW] Observer registration check:")
+            logger.info(f"[WORKFLOW]   - observer_callback provided: {observer_callback is not None}")
+            logger.info(f"[WORKFLOW]   - self.observer exists: {self.observer is not None}")
+            
+            if observer_callback and self.observer:
+                logger.info(f"[WORKFLOW] Registering observer callback for real-time step streaming")
+                self.observer.register_callback(observer_callback)
+                logger.info(f"[WORKFLOW] Observer callback registered. Total callbacks: {len(self.observer.callbacks)}")
+            elif observer_callback and not self.observer:
+                logger.warning(f"[WORKFLOW] Observer callback provided but observer not initialized!")
+            else:
+                if observer_callback:
+                    logger.info(f"[WORKFLOW] Observer callback provided but won't register (missing observer)")
+                if self.observer:
+                    logger.info(f"[WORKFLOW] Observer exists but no callback provided")
             
             # Create initial state with the expected parameters
             state = create_initial_state(

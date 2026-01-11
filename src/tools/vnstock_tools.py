@@ -10,8 +10,24 @@ from typing import Optional
 from datetime import datetime, timedelta
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field, validator
-from vnstock import Vnstock
 import pandas as pd
+import sys
+import io
+
+# Suppress vnstock promotional output that causes Unicode encoding errors on Windows
+# vnstock tries to print emoji which cp1252 encoding can't handle
+_old_stdout = None
+try:
+    _old_stdout = sys.stdout
+    sys.stdout = io.StringIO()
+    from vnstock import Vnstock
+    sys.stdout = _old_stdout
+except Exception as e:
+    if _old_stdout:
+        sys.stdout = _old_stdout
+    # If vnstock import fails, log warning but continue
+    logging.warning(f"Failed to import vnstock: {e}")
+    Vnstock = None
 
 logger = logging.getLogger(__name__)
 
@@ -244,8 +260,42 @@ def get_historical_data(
         # Calculate dates based on period if provided
         if period and not start_date:
             end_date = datetime.now().strftime("%Y-%m-%d")
-            period_value = int(period[:-1])
-            period_unit = period[-1].upper()
+            
+            # Handle Vietnamese text and normalize period
+            period_normalized = str(period).strip().lower()
+            
+            # Map Vietnamese descriptions to standard format
+            vietnamese_to_period = {
+                '3 tháng gần nhất': '3M',
+                '3 tháng': '3M',
+                '6 tháng gần nhất': '6M',
+                '6 tháng': '6M',
+                '1 năm gần nhất': '1Y',
+                '1 năm': '1Y',
+                'năm qua': '1Y',
+                '2 năm': '2Y',
+                '5 năm': '5Y',
+                '1 tháng': '1M',
+                '2 tháng': '2M',
+                '1 tuần': '1W',
+                '2 tuần': '2W',
+                '1 ngày': '1D',
+                '1 tháng gần nhất': '1M',
+                '2 tháng gần nhất': '2M',
+            }
+            
+            # Try to match Vietnamese period
+            if period_normalized in vietnamese_to_period:
+                period_normalized = vietnamese_to_period[period_normalized]
+            
+            # Extract numeric value and unit from normalized period
+            try:
+                period_value = int(period_normalized[:-1])
+                period_unit = period_normalized[-1].upper()
+            except (ValueError, IndexError):
+                logger.warning(f"❌ Invalid period format: {period}. Using default 3 months.")
+                period_value = 3
+                period_unit = 'M'
             
             if period_unit == 'M':
                 start_date = (datetime.now() - timedelta(days=period_value * 30)).strftime("%Y-%m-%d")

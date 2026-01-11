@@ -103,6 +103,16 @@ class WorkflowObserver:
         self.node_times: Dict[str, List[float]] = {}
         self.node_counts: Dict[str, int] = {}
     
+    def reset(self):
+        """
+        Reset observer state for a new workflow invocation.
+        Clears steps but keeps callbacks and performance history.
+        """
+        self.steps: List[WorkflowStep] = []
+        self.workflow_start_time: Optional[float] = None
+        self.workflow_end_time: Optional[float] = None
+        self.logger.info("[OBSERVER] Reset for new workflow invocation")
+    
     def register_callback(self, callback: Callable):
         """
         Register callback for step events.
@@ -111,6 +121,7 @@ class WorkflowObserver:
             callback: Async callable(step: WorkflowStep)
         """
         self.callbacks.append(callback)
+        self.logger.info(f"[OBSERVER] Callback registered. Total callbacks: {len(self.callbacks)}")
     
     async def emit_step_started(
         self,
@@ -143,7 +154,9 @@ class WorkflowObserver:
             self.workflow_start_time = time.time()
         
         self.logger.info(f"Step {step_number}: {node_name} started")
+        self.logger.info(f"[OBSERVER:CALLBACK-INVOKE] About to call callbacks for STARTED event (step {step_number})")
         await self._emit_callbacks(step)
+        self.logger.info(f"[OBSERVER:CALLBACK-INVOKE] Callbacks completed for STARTED event (step {step_number})")
         
         return step
     
@@ -177,7 +190,10 @@ class WorkflowObserver:
             f"({step.duration:.2f}s, {output_size} bytes)"
         )
         
+        self.logger.info(f"[OBSERVER:CALLBACK-INVOKE] About to call callbacks for COMPLETED event (step {step.step_number})")
+        self.logger.info(f"[OBSERVER:CALLBACK-INVOKE] Callbacks registered at this moment: {len(self.callbacks)}")
         await self._emit_callbacks(step)
+        self.logger.info(f"[OBSERVER:CALLBACK-INVOKE] Callbacks completed for COMPLETED event (step {step.step_number})")
     
     async def emit_step_failed(
         self,
@@ -248,12 +264,25 @@ class WorkflowObserver:
         Args:
             step: WorkflowStep to emit
         """
-        for callback in self.callbacks:
+        self.logger.info(f"[OBSERVER:EMIT] _emit_callbacks called for step {step.step_number}: {step.node_name}")
+        self.logger.info(f"[OBSERVER:EMIT] Total callbacks registered: {len(self.callbacks)}")
+        
+        if not self.callbacks:
+            self.logger.warning(f"[OBSERVER:EMIT] ⚠️ NO CALLBACKS REGISTERED for step {step.step_number}")
+            return
+            
+        self.logger.info(f"[OBSERVER:EMIT] Calling {len(self.callbacks)} callback(s) for step {step.step_number}: {step.node_name}")
+        for i, callback in enumerate(self.callbacks):
             try:
+                callback_name = callback.__name__ if hasattr(callback, '__name__') else 'unknown'
+                self.logger.info(f"[OBSERVER:EMIT]   → Invoking callback {i+1}/{len(self.callbacks)}: {callback_name}")
                 if callable(callback):
                     await callback(step)
+                    self.logger.info(f"[OBSERVER:EMIT]   ✓ Callback {i+1} completed successfully")
+                else:
+                    self.logger.warning(f"[OBSERVER:EMIT]   ✗ Callback {i+1} is not callable!")
             except Exception as e:
-                self.logger.error(f"Callback failed: {e}")
+                self.logger.error(f"[OBSERVER:EMIT] Callback {i+1} failed: {e}", exc_info=True)
     
     def _track_performance(self, node_name: str, duration: float):
         """

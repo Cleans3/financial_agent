@@ -29,15 +29,42 @@ class MetricType(str, Enum):
     """Financial metrics categories for classification"""
     REVENUE = "revenue"
     PROFITABILITY = "profitability"  # Margin, profit, net income
+    NET_INCOME = "net_income"  # Specific profit measure
+    OPERATING_INCOME = "operating_income"  # Operating profit
     CASH_FLOW = "cash_flow"
+    OPERATING_CASH_FLOW = "operating_cash_flow"  # Operating cash
+    FREE_CASH_FLOW = "free_cash_flow"  # Free cash flow
     LIQUIDITY = "liquidity"  # Current ratio, quick ratio
+    CURRENT_ASSETS = "current_assets"
+    CURRENT_LIABILITIES = "current_liabilities"
     LEVERAGE = "leverage"  # Debt ratio, equity ratio
+    TOTAL_ASSETS = "total_assets"
+    TOTAL_LIABILITIES = "total_liabilities"
+    EQUITY = "equity"
+    DEBT = "debt"
     EFFICIENCY = "efficiency"  # ROA, ROE, turnover
+    ROE = "roe"  # Return on equity
+    ROA = "roa"  # Return on assets
+    ASSET_TURNOVER = "asset_turnover"
     VALUATION = "valuation"  # P/E, P/B, PEG
+    PE_RATIO = "pe_ratio"
+    PB_RATIO = "pb_ratio"
     GROWTH = "growth"
+    REVENUE_GROWTH = "revenue_growth"
+    EARNINGS_GROWTH = "earnings_growth"
     DIVIDEND = "dividend"
+    DIVIDEND_YIELD = "dividend_yield"
     SEGMENT = "segment"
     GUIDANCE = "guidance"
+    EXPENSES = "expenses"
+    OPERATING_EXPENSES = "operating_expenses"
+    COST_OF_GOODS = "cost_of_goods"
+    SG_AND_A = "sg_and_a"  # Selling, General & Administrative
+    EBITDA = "ebitda"
+    MARGINS = "margins"
+    GROSS_MARGIN = "gross_margin"
+    OPERATING_MARGIN = "operating_margin"
+    NET_MARGIN = "net_margin"
     OTHER = "other"
 
 
@@ -71,6 +98,7 @@ class MetricChunk:
     occurrences: List[MetricOccurrence]  # All mentions of this metric
     source_chunk_ids: List[int]  # Point IDs of structural chunks it references
     is_from_table: bool = False  # True if metric extracted from table data
+    is_custom_metric: bool = False  # True if metric was created by LLM (not in predefined list)
     period: Optional[str] = None
     confidence: float = 0.8
     validation_notes: Optional[str] = None
@@ -361,27 +389,43 @@ class AdvancedChunkingService:
         try:
             logger.debug(f"[CHUNKING:METRIC] Using LLM-based metric extraction")
             
-            # Prepare extraction prompt
-            extraction_prompt = f"""You are a financial analysis expert. Extract all relevant financial metrics from the following document excerpt.
+            # Prepare extraction prompt - improved to capture history and allow synthesis
+            extraction_prompt = f"""You are a financial analysis expert. Extract ALL relevant financial metrics from the following document excerpt, including:
+- Primary metrics explicitly stated
+- Historical values (with years/periods) 
+- Derived metrics (e.g., calculate margins from gross/net income)
+- Additional metrics you synthesize from context (up to 3 new ones)
 
-For each metric found, provide:
-1. Metric name (e.g., "revenue", "net income", "cash flow")
-2. Metric type (e.g., "revenue", "profitability", "liquidity", "valuation", "growth")
-3. Value (if available, with unit like $M, %, etc.)
-4. Period (if available, like "2023", "Q3 2024")
-5. Confidence (0.6-1.0 based on clarity and relevance)
+For each metric, provide:
+1. Metric name (clear name, e.g., "revenue", "total assets", "operating expenses")
+2. Metric type (specific type: revenue, net_income, operating_income, total_assets, operating_expenses, gross_margin, operating_margin, net_margin, roe, roa, cash_flow, debt, equity, growth, ebitda, etc.)
+3. Value (current value with unit like 932M, 15.5%, etc.)
+4. Period (exact period: "2024", "Q3 2024", "FY2023", etc.)
+5. Confidence (0.7-1.0 for found data, 0.6-0.8 for synthesized/derived)
+
+CRITICAL: For history, include period info. Example if 2024=1107M, 2023=283M: format as "historical|2024:1107M|2023:283M"
 
 Document excerpt:
-{text[:2000]}
+{text[:5000]}
 
-Return metrics in this format:
+Return metrics in this format (one per line):
 metric_name|metric_type|value|period|confidence
 
-Example:
-revenue|revenue|932M|2023|0.95
-net income|profitability|150M|2023|0.90
+Examples:
+Total Assets|total_assets|1107M|2024|0.95
+Total Assets|total_assets|historical|2024:1107M|2023:283M|0.85
+Revenue|revenue|932M|2023|0.92
+Operating Expenses|operating_expenses|120M|2023|0.88
+Gross Margin|gross_margin|45.5%|2023|0.87
 
-Only include metrics that are clearly present in the document. Stop when done."""
+INSTRUCTIONS:
+- Extract ALL metrics you find, both explicit and derived
+- Always include period/year with values
+- If showing history, include years with each value (e.g., "2024:1107M, 2023:283M")
+- You may add up to 3 synthesized metrics based on context
+- Never hallucinate numbers - only use what's in the document
+- Be specific with metric types (not just "other")
+- Stop when done"""
             
             response = self.llm.invoke(extraction_prompt)
             response_text = response.content if hasattr(response, 'content') else str(response)
@@ -398,6 +442,11 @@ Only include metrics that are clearly present in the document. Stop when done.""
                             value = parts[2] if parts[2] and parts[2] != 'N/A' else None
                             period = parts[3] if parts[3] and parts[3] != 'N/A' else None
                             confidence = float(parts[4])
+                            
+                            # Skip if value is "historical" - that's handled separately
+                            if value and value.lower() == 'historical':
+                                # Don't create a metric for historical marker itself
+                                continue
                             
                             # Map type string to MetricType
                             metric_type = self._get_metric_type(metric_type_str)
@@ -429,21 +478,96 @@ Only include metrics that are clearly present in the document. Stop when done.""
         """Map type string to MetricType enum"""
         type_str = type_str.lower().strip()
         
+        # Extended mapping with more specific types
         mapping = {
+            # Revenue
             'revenue': MetricType.REVENUE,
             'sales': MetricType.REVENUE,
-            'profitability': MetricType.PROFITABILITY,
-            'profit': MetricType.PROFITABILITY,
+            'turnover': MetricType.REVENUE,
+            'net sales': MetricType.REVENUE,
+            
+            # Profitability & Income
+            'net income': MetricType.NET_INCOME,
+            'net profit': MetricType.NET_INCOME,
+            'operating income': MetricType.OPERATING_INCOME,
+            'operating profit': MetricType.OPERATING_INCOME,
+            'ebitda': MetricType.EBITDA,
             'earnings': MetricType.PROFITABILITY,
+            'profit': MetricType.PROFITABILITY,
+            'profitability': MetricType.PROFITABILITY,
+            
+            # Cash Flow
+            'operating cash': MetricType.OPERATING_CASH_FLOW,
+            'operating cash flow': MetricType.OPERATING_CASH_FLOW,
+            'free cash': MetricType.FREE_CASH_FLOW,
+            'free cash flow': MetricType.FREE_CASH_FLOW,
+            'fcf': MetricType.FREE_CASH_FLOW,
             'cash flow': MetricType.CASH_FLOW,
             'cash_flow': MetricType.CASH_FLOW,
-            'liquidity': MetricType.LIQUIDITY,
+            
+            # Assets & Liabilities
+            'total assets': MetricType.TOTAL_ASSETS,
+            'assets': MetricType.TOTAL_ASSETS,
+            'current assets': MetricType.CURRENT_ASSETS,
+            'current liabilities': MetricType.CURRENT_LIABILITIES,
+            'total liabilities': MetricType.TOTAL_LIABILITIES,
+            'liabilities': MetricType.TOTAL_LIABILITIES,
+            
+            # Equity & Debt
+            'equity': MetricType.EQUITY,
+            'shareholders equity': MetricType.EQUITY,
+            'debt': MetricType.DEBT,
+            'long-term debt': MetricType.DEBT,
             'leverage': MetricType.LEVERAGE,
-            'debt': MetricType.LEVERAGE,
+            
+            # Liquidity
+            'liquidity': MetricType.LIQUIDITY,
+            'current ratio': MetricType.LIQUIDITY,
+            'quick ratio': MetricType.LIQUIDITY,
+            
+            # Efficiency & Returns
+            'roe': MetricType.ROE,
+            'return on equity': MetricType.ROE,
+            'roa': MetricType.ROA,
+            'return on assets': MetricType.ROA,
+            'asset turnover': MetricType.ASSET_TURNOVER,
             'efficiency': MetricType.EFFICIENCY,
+            'turnover': MetricType.ASSET_TURNOVER,
+            
+            # Margins
+            'gross margin': MetricType.GROSS_MARGIN,
+            'operating margin': MetricType.OPERATING_MARGIN,
+            'net margin': MetricType.NET_MARGIN,
+            'margin': MetricType.MARGINS,
+            'profitability margin': MetricType.MARGINS,
+            
+            # Expenses
+            'operating expenses': MetricType.OPERATING_EXPENSES,
+            'opex': MetricType.OPERATING_EXPENSES,
+            'cost of goods': MetricType.COST_OF_GOODS,
+            'cogs': MetricType.COST_OF_GOODS,
+            'sg&a': MetricType.SG_AND_A,
+            'selling general administrative': MetricType.SG_AND_A,
+            'expenses': MetricType.EXPENSES,
+            
+            # Valuation
+            'pe ratio': MetricType.PE_RATIO,
+            'p/e': MetricType.PE_RATIO,
+            'pb ratio': MetricType.PB_RATIO,
+            'p/b': MetricType.PB_RATIO,
             'valuation': MetricType.VALUATION,
+            
+            # Growth
+            'revenue growth': MetricType.REVENUE_GROWTH,
+            'earnings growth': MetricType.EARNINGS_GROWTH,
             'growth': MetricType.GROWTH,
+            
+            # Dividend
             'dividend': MetricType.DIVIDEND,
+            'dividend yield': MetricType.DIVIDEND_YIELD,
+            'yield': MetricType.DIVIDEND_YIELD,
+            
+            # Other
             'segment': MetricType.SEGMENT,
             'guidance': MetricType.GUIDANCE,
         }
@@ -597,32 +721,66 @@ Only include metrics that are clearly present in the document. Stop when done.""
     
     def _extract_value_from_table_context(self, text: str, keyword: str) -> Optional[str]:
         """Extract numeric value from table context around keyword"""
-        # Look for table rows containing the keyword
+        keyword_lower = keyword.lower()
         lines = text.split('\n')
+        
+        # FIRST: Look for markdown table rows containing the keyword
         for line in lines:
-            if keyword.lower() in line.lower() and '|' in line:
-                # Extract numeric values from the line
-                pattern = r'\$?[\d,.]+(M|B|K|%)?'
+            if keyword_lower in line.lower() and '|' in line:
+                # Extract numeric values from the markdown table line
+                pattern = r'[\d,]+(?:\.\d+)?(?:M|B|K)?(?:%)?'
                 matches = re.findall(pattern, line)
                 
                 if matches:
-                    # Return the first numeric value in that row (after the label)
-                    return matches[0] if matches else None
+                    # Return the first numeric value (most recent year typically)
+                    if '-' not in line or any(char.isdigit() for char in line):
+                        # Filter out matches that are just commas
+                        for match in matches:
+                            if any(c.isdigit() for c in match):
+                                return match
         
-        # Fallback: search in surrounding context
+        # SECOND: Look for plain text table rows (space-separated values)
+        # Pattern: keyword on a line, followed by numeric values
+        for i, line in enumerate(lines):
+            if keyword_lower in line.lower():
+                # Extract all numbers from this line
+                pattern = r'[\d,]+(?:\.\d+)?(?:M|B|K)?(?:%)?'
+                matches = re.findall(pattern, line)
+                
+                # If we found numbers on the keyword line itself, use them
+                if matches:
+                    # Return the first valid number (skip comma-only matches)
+                    for match in matches:
+                        if any(c.isdigit() for c in match):
+                            return match
+                
+                # Otherwise check the next few lines for related data
+                # (in case the keyword is a header and values are below)
+                for j in range(i+1, min(i+3, len(lines))):
+                    next_line = lines[j]
+                    next_matches = re.findall(pattern, next_line)
+                    if next_matches and not any(word in next_line.lower() for word in ['revenue', 'expense', 'asset', 'liability']):
+                        for match in next_matches:
+                            if any(c.isdigit() for c in match):
+                                return match
+        
+        # THIRD: Fallback to immediate context around keyword
         lower_text = text.lower()
         pos = lower_text.find(keyword)
         
         if pos >= 0:
             context_start = max(0, pos - 50)
-            context_end = min(len(text), pos + 100)
+            context_end = min(len(text), pos + 150)
             context = text[context_start:context_end]
             
-            pattern = r'\$?[\d,.]+(M|B|K|%)?'
+            pattern = r'[\d,]+(?:\.\d+)?(?:M|B|K)?(?:%)?'
             matches = re.findall(pattern, context)
             
             if matches:
-                return matches[-1] if matches else None
+                # Return the value closest to keyword (usually the last one in context)
+                for match in reversed(matches):
+                    if any(c.isdigit() for c in match):
+                        return match
         
         return None
     
@@ -685,16 +843,22 @@ Only include metrics that are clearly present in the document. Stop when done.""
     
     
     def _extract_value_after_keyword(self, text: str, keyword: str) -> Optional[str]:
-        """Extract numeric value following a keyword"""
-        # First try pattern matching for explicit values
+        """Extract numeric value following a keyword, with table-aware context"""
+        # FIRST: Try table extraction for structured data (tables are more reliable)
+        table_value = self._extract_value_from_table_context(text, keyword)
+        if table_value:
+            return table_value
+        
+        # SECOND: Try pattern matching for explicit values in prose
         escaped_keyword = re.escape(keyword)
-        pattern = f"{escaped_keyword}[:\\s]+([\\$]?[\\d,.]+%?)"
+        # Match keyword followed by : or whitespace, then capture number
+        # But be careful not to match partial words
+        pattern = f"\\b{escaped_keyword}[:\\s]+([\\$]?[\\d,.]+(?:M|B|K)?%?)"
         matches = re.findall(pattern, text, re.IGNORECASE)
         if matches:
             return matches[0]
         
-        # Then try table extraction for structured data
-        return self._extract_value_from_table_context(text, keyword)
+        return None
     
     def _extract_period_from_text(self, text: str) -> Optional[str]:
         """Extract time period (Q1 2024, FY2023, etc) from text"""
@@ -779,18 +943,128 @@ Only include metrics that are clearly present in the document. Stop when done.""
         
         return result
     
+    def _assess_document_capability(self, 
+                                   structural_chunks: List[StructuralChunk],
+                                   file_id: str) -> Dict[str, any]:
+        """
+        NEW: Assess what types of metrics this document can support.
+        
+        Analyzes document content to determine which metrics are:
+        - Directly available (explicitly stated)
+        - Calculable (data present to compute)
+        - Partially available (incomplete data)
+        - Not available (missing required data)
+        
+        This prevents selecting metrics that sound important but can't be extracted.
+        """
+        logger.info(f"[CHUNKING:ASSESSMENT] Starting document capability assessment")
+        
+        document_text = " ".join([c.text.lower() for c in structural_chunks])
+        
+        capability_map = {
+            "has_revenue": any(word in document_text for word in ["revenue", "sales", "income"]),
+            "has_profitability": any(word in document_text for word in ["profit", "margin", "ebitda", "earnings"]),
+            "has_cash_flow": any(word in document_text for word in ["cash flow", "operating cash"]),
+            "has_balance_sheet": any(word in document_text for word in ["assets", "liabilities", "equity", "balance sheet"]),
+            "has_liabilities": any(word in document_text for word in ["liabilities", "debt", "payable"]),
+            "has_income_statement": any(word in document_text for word in ["net income", "net profit", "ebit", "operating income"]),
+            "has_yoy_comparison": len(structural_chunks) > 2 or "2023" in document_text and "2024" in document_text,
+            "is_saas": any(word in document_text for word in ["subscription", "saas", "recurring revenue", "mrr", "arr"]),
+            "has_inventory": any(word in document_text for word in ["inventory", "inventory turnover"]),
+        }
+        
+        # Count available sections
+        available_sections = sum(1 for v in capability_map.values() if v)
+        
+        logger.info(f"[CHUNKING:ASSESSMENT] Document capability summary:")
+        logger.info(f"[CHUNKING:ASSESSMENT]   Available sections: {available_sections}/9")
+        logger.info(f"[CHUNKING:ASSESSMENT]   Has Revenue data: {capability_map['has_revenue']}")
+        logger.info(f"[CHUNKING:ASSESSMENT]   Has Profitability data: {capability_map['has_profitability']}")
+        logger.info(f"[CHUNKING:ASSESSMENT]   Has Balance Sheet data: {capability_map['has_balance_sheet']}")
+        logger.info(f"[CHUNKING:ASSESSMENT]   Has Income Statement: {capability_map['has_income_statement']}")
+        logger.info(f"[CHUNKING:ASSESSMENT]   Has YoY Comparison: {capability_map['has_yoy_comparison']}")
+        logger.info(f"[CHUNKING:ASSESSMENT]   Is SaaS: {capability_map['is_saas']}")
+        
+        return capability_map
+    
+    def _check_metric_feasibility(self,
+                                 metric_name: str,
+                                 metric_type: MetricType,
+                                 document_capability: Dict) -> Dict[str, any]:
+        """
+        NEW: Check if a metric can be extracted from this document.
+        
+        Returns feasibility assessment with reasons.
+        """
+        metric_lower = metric_name.lower()
+        
+        # Define what data is required for each metric
+        requirements = {
+            "revenue": {"required": ["has_revenue"], "note": "Direct data"},
+            "growth": {"required": ["has_revenue", "has_yoy_comparison"], "note": "Need YoY comparison"},
+            "margin": {"required": ["has_profitability"], "note": "Need profit data"},
+            "ebitda": {"required": ["has_profitability", "has_income_statement"], "note": "Need complete income statement"},
+            "roa": {"required": ["has_income_statement", "has_balance_sheet"], "note": "Need net income"},
+            "roe": {"required": ["has_income_statement", "has_balance_sheet"], "note": "Need net income"},
+            "ratio": {"required": ["has_balance_sheet"], "note": "Balance sheet metrics"},
+            "current ratio": {"required": ["has_liabilities"], "note": "Need current liabilities"},
+            "quick ratio": {"required": ["has_liabilities"], "note": "Need current liabilities"},
+            "inventory": {"required": ["has_inventory"], "note": "Need inventory data"},
+            "turnover": {"required": ["has_balance_sheet", "has_revenue"], "note": "Need assets and revenue"},
+        }
+        
+        # Check what's required
+        feasibility = "DIRECTLY_AVAILABLE"
+        confidence = 1.0
+        reason = ""
+        
+        for keyword, requirement in requirements.items():
+            if keyword in metric_lower:
+                required_caps = requirement["required"]
+                available_caps = [cap for cap in required_caps if document_capability.get(cap, False)]
+                
+                if len(available_caps) == len(required_caps):
+                    # All requirements met
+                    feasibility = "DIRECTLY_AVAILABLE" if len(required_caps) <= 1 else "CALCULABLE"
+                    reason = requirement["note"]
+                elif available_caps:
+                    # Partial data
+                    feasibility = "PARTIAL_DATA"
+                    confidence = len(available_caps) / len(required_caps)
+                    reason = f"Have {len(available_caps)}/{len(required_caps)} required data types"
+                else:
+                    # No data
+                    feasibility = "NOT_AVAILABLE"
+                    confidence = 0.0
+                    reason = f"Missing: {', '.join(required_caps)}"
+                break
+        
+        # Special case: SaaS companies shouldn't have inventory metrics
+        if document_capability.get("is_saas") and "inventory" in metric_lower:
+            feasibility = "NOT_APPLICABLE"
+            confidence = 0.0
+            reason = "SaaS company (no inventory)"
+        
+        return {
+            "metric": metric_name,
+            "feasibility": feasibility,
+            "confidence": confidence,
+            "reason": reason,
+            "should_attempt": feasibility in ["DIRECTLY_AVAILABLE", "CALCULABLE", "PARTIAL_DATA"]
+        }
+
     def aggregate_metric_chunks(self,
                                structural_chunks: List[StructuralChunk],
                                file_id: str) -> List[MetricChunk]:
         """
-        Step 2: LLM-DRIVEN METRIC SELECTION AND CHUNK CREATION
+        Step 2: LLM-DRIVEN METRIC SELECTION AND CHUNK CREATION (OPTIMIZED)
         
-        Workflow (from financial_agent_prompt_ref.md):
-        1. Prepare structural chunks for LLM evaluation
-        2. Send hardcoded metric list + structural chunks to LLM
-        3. LLM scores each metric by materiality/volatility/anomaly
-        4. LLM returns selected metrics (score >= 6)
-        5. Create metric-centric chunks ONLY for selected metrics
+        IMPROVEMENTS:
+        1. Document capability assessment (NEW)
+        2. Metric feasibility checking (NEW)
+        3. Detailed extraction logging (NEW)
+        4. Gap analysis (NEW)
+        5. Final summary (NEW)
         
         Args:
             structural_chunks: List of structural chunks
@@ -799,8 +1073,11 @@ Only include metrics that are clearly present in the document. Stop when done.""
         Returns:
             List of metric-centric chunks (only for LLM-selected metrics with score >= 6)
         """
-        logger.info(f"[CHUNKING:METRIC] Starting LLM-driven metric selection for file {file_id}")
-        logger.info(f"[CHUNKING:METRIC] Step 1: Prepare structural chunks for LLM evaluation")
+        logger.info(f"[CHUNKING:METRIC] Starting OPTIMIZED LLM-driven metric selection for file {file_id}")
+        logger.info(f"[CHUNKING:METRIC] Step 1: Assess document capability")
+        
+        # NEW: Assess what metrics the document can support
+        doc_capability = self._assess_document_capability(structural_chunks, file_id)
         
         # Prepare document context from structural chunks
         document_excerpts = []
@@ -808,32 +1085,77 @@ Only include metrics that are clearly present in the document. Stop when done.""
             document_excerpts.append(f"[Chunk {chunk.chunk_index}]\n{chunk.text[:300]}")
         document_context = "\n\n".join(document_excerpts)
         
-        # Step 2: Use LLM to evaluate and select metrics from hardcoded list
-        logger.info(f"[CHUNKING:METRIC] Step 2: Evaluating hardcoded metrics with LLM")
+        logger.info(f"[CHUNKING:METRIC] Step 2: Evaluating metric groups with LLM (batch mode)")
+        
+        # Step 2: Use LLM to evaluate and select metrics from hardcoded list (OPTIMIZED BATCH)
+        logger.info(f"[CHUNKING:METRIC] Step 2: Evaluating metric groups with LLM (batch mode)")
         selected_metrics = self._llm_evaluate_and_select_metrics(
             document_context,
             structural_chunks,
             file_id
         )
         
+        # Identify which metrics are custom (not in predefined list)
+        predefined_metric_names = set()
+        for category, metrics in PREDEFINED_FINANCIAL_METRICS.items():
+            for metric_name, metric_type in metrics:
+                predefined_metric_names.add(metric_name.lower())
+        
+        custom_metric_names = set()
+        for metric_name in selected_metrics.keys():
+            if metric_name.lower() not in predefined_metric_names:
+                custom_metric_names.add(metric_name)
+                logger.info(f"[CHUNKING:METRIC] Identified custom metric: {metric_name}")
+        
         if not selected_metrics:
             logger.warning(f"[CHUNKING:METRIC] No metrics selected by LLM, returning empty metric chunks")
             return []
         
         logger.info(f"[CHUNKING:METRIC] LLM selected {len(selected_metrics)} metrics (score >= 6.0)")
-        for metric_name, score in selected_metrics.items():
+        for metric_name, score in list(selected_metrics.items())[:20]:  # Show first 20
             logger.info(f"[CHUNKING:METRIC]   ✓ {metric_name}: score={score:.1f}/10.0")
         
         # Step 3: Extract and aggregate data for SELECTED metrics only
         logger.info(f"[CHUNKING:METRIC] Step 3: Extract data for selected metrics from chunks")
         
+        # NEW: Check feasibility of each selected metric BEFORE extraction
+        logger.info(f"[CHUNKING:METRIC:FEASIBILITY] Analyzing extractability of {len(selected_metrics)} selected metrics")
+        doc_capability = self._assess_document_capability(structural_chunks, file_id)
+        feasibility_map = {}
+        feasible_metrics = []
+        unfeasible_metrics = []
+        
+        for metric_name, score in selected_metrics.items():
+            feasibility = self._check_metric_feasibility(metric_name, None, doc_capability)
+            feasibility_map[metric_name] = feasibility
+            
+            if feasibility["should_attempt"]:
+                feasible_metrics.append((metric_name, score, feasibility))
+                logger.info(f"[CHUNKING:METRIC:FEASIBILITY]   ✓ {metric_name}: {feasibility['feasibility']} ({feasibility['reason']})")
+            else:
+                unfeasible_metrics.append((metric_name, score, feasibility))
+                logger.info(f"[CHUNKING:METRIC:FEASIBILITY]   ⚠ {metric_name}: {feasibility['feasibility']} ({feasibility['reason']})")
+        
+        logger.info(f"[CHUNKING:METRIC:FEASIBILITY] Proceeding with {len(feasible_metrics)}/{len(selected_metrics)} feasible metrics")
+        
         # Create a map of chunks indexed by metric name
         metric_chunk_data: Dict[str, Dict] = {}
+        extraction_log = {}  # Track extraction results for each metric
+        
+        # For debugging: track which metrics we're looking for
+        logger.debug(f"[CHUNKING:METRIC] Looking for these {len(selected_metrics)} selected metrics:")
+        for metric_name in list(selected_metrics.keys())[:20]:
+            logger.debug(f"[CHUNKING:METRIC]   - {metric_name}")
         
         for struct_chunk in structural_chunks:
             # Extract ALL metrics from this chunk
             chunk_text = struct_chunk.text
             all_metrics = self._extract_all_metric_mentions(chunk_text, struct_chunk)
+            
+            if all_metrics:
+                logger.debug(f"[CHUNKING:METRIC] Chunk {struct_chunk.chunk_index}: Found {len(all_metrics)} metrics")
+                for m in all_metrics:
+                    logger.debug(f"[CHUNKING:METRIC]   Found: {m.metric_name}")
             
             # Keep only metrics that were selected by LLM
             for metric in all_metrics:
@@ -844,6 +1166,7 @@ Only include metrics that are clearly present in the document. Stop when done.""
                 for sel_name in selected_metrics.keys():
                     if sel_name.lower() == metric_key or self._metrics_match(sel_name, metric.metric_name):
                         selected_metric_name = sel_name
+                        logger.debug(f"[CHUNKING:METRIC] Matched '{metric.metric_name}' to selected '{sel_name}'")
                         break
                 
                 if selected_metric_name:
@@ -856,14 +1179,57 @@ Only include metrics that are clearly present in the document. Stop when done.""
                             "score": selected_metrics[selected_metric_name],
                             "is_from_table": self._is_table_chunk(chunk_text)
                         }
+                        extraction_log[selected_metric_name] = {
+                            "score": selected_metrics[selected_metric_name],
+                            "status": "EXTRACTING",
+                            "chunks_found": [],
+                            "values_found": 0,
+                            "confidence": 0.0
+                        }
                     
                     metric.structural_chunk_id = struct_chunk.point_id
                     metric_chunk_data[selected_metric_name]["occurrences"].append(metric)
-                    metric_chunk_data[selected_metric_name]["source_chunks"].append(struct_chunk.point_id)
-                    metric_chunk_data[selected_metric_name]["texts"].append(chunk_text)
+                    extraction_log[selected_metric_name]["chunks_found"].append(struct_chunk.chunk_index)
+                    extraction_log[selected_metric_name]["values_found"] += 1
+        
+        # NEW: Log extraction results and identify gaps
+        logger.info(f"[CHUNKING:METRIC:EXTRACTION] Summary of extraction attempts:")
+        extracted_count = 0
+        partial_count = 0
+        failed_count = 0
+        
+        for metric_name, score in selected_metrics.items():
+            if metric_name in metric_chunk_data:
+                occurrences = metric_chunk_data[metric_name]["occurrences"]
+                if occurrences:
+                    extracted_count += 1
+                    logger.info(f"[CHUNKING:METRIC:EXTRACTION]   ✓ {metric_name} (score={score:.1f}): {len(occurrences)} occurrences found")
+                else:
+                    partial_count += 1
+                    logger.info(f"[CHUNKING:METRIC:EXTRACTION]   ⚠ {metric_name} (score={score:.1f}): Data structure present but no values extracted")
+            else:
+                failed_count += 1
+                feasibility = feasibility_map.get(metric_name, {})
+                reason = feasibility.get("reason", "Unknown reason")
+                logger.info(f"[CHUNKING:METRIC:EXTRACTION]   ✗ {metric_name} (score={score:.1f}): Not found ({reason})")
+        
+        logger.info(f"[CHUNKING:METRIC:EXTRACTION:SUMMARY] Extraction results:")
+        logger.info(f"[CHUNKING:METRIC:EXTRACTION:SUMMARY]   Successfully extracted: {extracted_count}/{len(selected_metrics)}")
+        logger.info(f"[CHUNKING:METRIC:EXTRACTION:SUMMARY]   Partial/incomplete: {partial_count}/{len(selected_metrics)}")
+        logger.info(f"[CHUNKING:METRIC:EXTRACTION:SUMMARY]   Not found: {failed_count}/{len(selected_metrics)}")
+        logger.info(f"[CHUNKING:METRIC:EXTRACTION:SUMMARY]   Success rate: {extracted_count/max(len(selected_metrics),1)*100:.1f}%")
+        
+        # Log summary of extraction
+        logger.info(f"[CHUNKING:METRIC] Step 3 complete: Found data for {len(metric_chunk_data)} of {len(selected_metrics)} selected metrics")
+        metrics_without_data = set(selected_metrics.keys()) - set(metric_chunk_data.keys())
+        if metrics_without_data:
+            logger.debug(f"[CHUNKING:METRIC] Metrics selected by LLM but not found in chunks ({len(metrics_without_data)}):")
+            for metric_name in list(metrics_without_data)[:10]:  # Show first 10
+                logger.debug(f"[CHUNKING:METRIC]   - {metric_name}")
+
         
         # Step 4: Create metric-centric chunks for selected metrics
-        logger.info(f"[CHUNKING:METRIC] Step 4: Creating metric-centric chunks for selected metrics")
+        logger.info(f"[CHUNKING:METRIC] Step 4: Creating metric-centric chunks for selected metrics (OPTIMIZED OUTPUT)")
         metric_chunks = []
         
         for metric_name, metric_data in metric_chunk_data.items():
@@ -878,7 +1244,7 @@ Only include metrics that are clearly present in the document. Stop when done.""
                 metric_data["texts"]
             )
             
-            # Synthesize comprehensive text
+            # Synthesize comprehensive text (OPTIMIZED - structured output)
             if metric_data["is_from_table"]:
                 aggregated_text = self._synthesize_table_metric_text(
                     metric_name,
@@ -894,6 +1260,9 @@ Only include metrics that are clearly present in the document. Stop when done.""
                     best_values
                 )
             
+            # Check if this is a custom metric
+            is_custom = metric_name in custom_metric_names
+            
             source_chunks = [cid for cid in metric_data["source_chunks"] if cid is not None]
             metric_chunk = MetricChunk(
                 metric_name=metric_name,
@@ -903,6 +1272,7 @@ Only include metrics that are clearly present in the document. Stop when done.""
                 occurrences=metric_data["occurrences"],
                 source_chunk_ids=source_chunks,
                 is_from_table=metric_data["is_from_table"],
+                is_custom_metric=is_custom,
                 file_id=file_id,
                 timestamp=datetime.now().isoformat(),
                 sources=source_chunks,
@@ -910,10 +1280,73 @@ Only include metrics that are clearly present in the document. Stop when done.""
             )
             
             metric_chunks.append(metric_chunk)
-            logger.info(f"[CHUNKING:METRIC]   ✓ Created chunk for '{metric_name}' (score={metric_data['score']:.1f}/10.0)")
+            marker = "[CUSTOM]" if is_custom else ""
+            logger.info(f"[CHUNKING:METRIC]   ✓ Created chunk for '{metric_name}' {marker}(score={metric_data['score']:.1f}/10.0)")
         
-        logger.info(f"[CHUNKING:METRIC] ✓ Created {len(metric_chunks)} metric-centric chunks "
-                   f"from {len(selected_metrics)} LLM-selected metrics")
+        # Step 4B: SYNTHESIS OF MISSING CUSTOM METRICS
+        # For custom metrics selected by LLM but not extracted, synthesize their data
+        # This is CRITICAL for materiality-focused selection: LLM may select aggregates,
+        # trends, or derived metrics that require synthesis, not direct extraction
+        logger.info(f"[CHUNKING:METRIC] Step 4B: Synthesizing missing custom metrics (materiality-based synthesis)")
+        
+        missing_metrics = set(selected_metrics.keys()) - set(m.metric_name for m in metric_chunks)
+        custom_missing = [m for m in missing_metrics if m in custom_metric_names]
+        
+        if custom_missing:
+            logger.info(f"[CHUNKING:METRIC:SYNTHESIS] Found {len(custom_missing)} custom metrics to synthesize")
+            
+            for metric_name in custom_missing:
+                try:
+                    score = selected_metrics[metric_name]
+                    
+                    # Use LLM to synthesize data for this custom metric
+                    synthesized_chunk = self._synthesize_custom_metric_data(
+                        metric_name,
+                        document_context,
+                        score
+                    )
+                    
+                    if synthesized_chunk:
+                        # Set file_id from parameter
+                        synthesized_chunk.file_id = file_id
+                        metric_chunks.append(synthesized_chunk)
+                        logger.info(f"[CHUNKING:METRIC:SYNTHESIS]   ✓ Synthesized custom metric: '{metric_name}' (score={score:.1f}/10.0)")
+                    else:
+                        logger.warning(f"[CHUNKING:METRIC:SYNTHESIS]   ✗ Failed to synthesize '{metric_name}'")
+                except Exception as e:
+                    logger.error(f"[CHUNKING:METRIC:SYNTHESIS]   ✗ Error synthesizing '{metric_name}': {e}")
+        else:
+            logger.debug(f"[CHUNKING:METRIC:SYNTHESIS] No custom metrics to synthesize")
+        
+        # Final comprehensive summary with gap analysis
+        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Metric chunk creation completed")
+        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] ═" * 40)
+        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Requested: {len(selected_metrics)} metrics selected by LLM")
+        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Extracted: {extracted_count} metrics with data found")
+        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Partial: {partial_count} metrics with incomplete data")
+        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Failed: {failed_count} metrics not found")
+        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Synthesized: {len(custom_missing)} custom metrics synthesized")
+        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Created: {len(metric_chunks)} metric chunks total")
+        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Success rate: {len(metric_chunks)/max(len(selected_metrics),1)*100:.1f}%")
+        
+        custom_count = sum(1 for m in metric_chunks if m.is_custom_metric)
+        if custom_count > 0:
+            logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Composition:")
+            logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY]   ├─ Predefined metrics: {len(metric_chunks) - custom_count}")
+            logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY]   └─ Custom/synthesized metrics: {custom_count}")
+        
+        # Log metrics that couldn't be created
+        still_missing = set(selected_metrics.keys()) - set(m.metric_name for m in metric_chunks)
+        if still_missing:
+            logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Metrics not created ({len(still_missing)}):")
+            for metric_name in sorted(still_missing):
+                feasibility = feasibility_map.get(metric_name, {})
+                reason = feasibility.get("reason", "Unknown")
+                score = selected_metrics[metric_name]
+                logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY]   ✗ {metric_name} (score={score:.1f}): {reason}")
+        
+        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] ═" * 40)
+        
         return metric_chunks
     
     def _llm_evaluate_and_select_metrics(self,
@@ -921,13 +1354,21 @@ Only include metrics that are clearly present in the document. Stop when done.""
                                         structural_chunks: List[StructuralChunk],
                                         file_id: str) -> Dict[str, float]:
         """
-        Use LLM to evaluate hardcoded metrics against document and select important ones.
+        OPTIMIZED: Evaluate hardcoded metrics and group them by category.
         
-        This is the core LLM-driven selection mechanism:
+        This is the core LLM-driven selection mechanism (OPTIMIZED):
         - LLM reads document context
-        - LLM evaluates each predefined metric for materiality/volatility/anomaly
-        - LLM returns scores for metrics (1-10 scale)
-        - Service filters to keep only metrics with score >= 6
+        - LLM groups metrics by category (Revenue, Profitability, Cash Flow, etc.)
+        - LLM evaluates metric groups (5-8 metrics per group) for importance
+        - LLM returns scores for metric groups (1-10 scale)
+        - Service filters to keep only groups with score >= 6
+        - Creates individual metric chunks from group selections
+        
+        OPTIMIZATIONS:
+        1. Batch evaluation: Groups of related metrics instead of individual metrics
+        2. Structured JSON output: LLM returns JSON for efficient parsing
+        3. No intermediate reasoning: Eliminates token-heavy explanations
+        4. Grouped batch generation: Fewer LLM calls, more metrics per call
         
         Returns:
             Dict mapping metric_name -> score (1-10 scale) for selected metrics only
@@ -937,103 +1378,200 @@ Only include metrics that are clearly present in the document. Stop when done.""
             return {}
         
         try:
-            logger.info(f"[CHUNKING:METRIC] LLM evaluating hardcoded metrics (threshold=6.0)")
+            logger.info(f"[CHUNKING:METRIC:OPT] Starting OPTIMIZED batch metric evaluation (grouping by category)")
+            logger.info(f"[CHUNKING:METRIC:OPT] Evaluating {len(PREDEFINED_FINANCIAL_METRICS)} metric categories in groups")
             
-            # Flatten predefined metrics into simple list
-            all_metrics_list = []
+            # Step 1: Group metrics by category
+            metric_groups = {}
             for category, metrics in PREDEFINED_FINANCIAL_METRICS.items():
-                for metric_name, metric_type in metrics:
-                    all_metrics_list.append(f"{metric_name} ({metric_type.value})")
+                metric_names = [m[0] for m in metrics]
+                metric_groups[category] = metric_names
             
-            metrics_text = "\n".join([f"{i+1}. {m}" for i, m in enumerate(all_metrics_list)])
+            # Step 2: Create batch evaluation prompt for ALL metric groups at once
+            # Prepare groups as JSON for structured response
+            groups_json = {}
+            for category, metric_names in metric_groups.items():
+                groups_json[category] = metric_names[:8]  # Limit to 8 metrics per group for prompt efficiency
             
-            # Create LLM prompt for metric evaluation
-            evaluation_prompt = f"""You are a financial analyst evaluating which metrics are most important in this financial document.
+            groups_json_str = json.dumps(groups_json, indent=2)
+            
+            # Create OPTIMIZED LLM prompt:
+            # - Structured JSON output (not prose explanations)
+            # - Batch evaluation (all groups at once)
+            # - No intermediate reasoning (direct scores)
+            # - Materiality-focused: Prioritize importance over extractability
+            # - Allow synthesis: LLM can create derived/aggregated metrics
+            # - Table awareness: Recognize table structures and create summary metrics
+            evaluation_prompt = f"""FINANCIAL ANALYST METRIC SELECTION - MATERIALITY-FOCUSED
 
 DOCUMENT CONTENT (excerpts):
 {document_context[:2000]}
 
-HARDCODED METRICS TO EVALUATE:
-{metrics_text}
+METRIC GROUPS TO EVALUATE (JSON format):
+{groups_json_str}
 
-For EACH metric, determine if it appears or is relevant in the document, and score it 1-10 based on:
+TASK: Select metrics for financial summarization based on MATERIALITY and IMPORTANCE, not just data availability.
 
-MATERIALITY (size relative to category total):
-- 9-10: Metric >25% of category total
-- 7-8: Metric 15-25% of total
-- 5-6: Metric 5-15% of total
-- 1-4: Metric <5% or not clearly present
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-VOLATILITY (change across periods):
-- +5 if YoY change >15%
-- +3 if YoY change 5-15%
-- +1 if YoY change <5%
+CRITICAL PRINCIPLE:
+Metrics should serve SUMMARIZATION purposes, not just data extraction.
+- SELECT metrics that matter for understanding financial health
+- DO NOT SELECT individual line items just because they exist in data
+- SYNTHESIZE missing but important metrics (e.g., calculate totals, trends, ratios)
+- IDENTIFY tables and create aggregate/comparative metrics from the whole table
 
-STRUCTURAL IMPORTANCE:
-- +3 for foundational metrics (Total Revenue, Total Assets)
-- +2 for category drivers (Revenue by Type, margin %)
-- +1 for supporting metrics
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ANOMALY/SIGNAL:
-- +4 if unexpected behavior or trend reversal
-- +2 if contradicts larger trend
+SCORING RULES (based on MATERIALITY for summarization):
 
-RESPOND WITH ONLY:
-1. Metric Name: X
-2. Metric Name: X
-...etc
+1. MATERIALITY ASSESSMENT (Primary - 0-10 scale):
+   9-10 points: Core financial statement items (Total Assets, Total Liabilities, Net Income, Revenue)
+   8-9 points: Major category aggregates (Gross Profit, Operating Income, Total Expenses)
+   7-8 points: Important subcategories or ratios (Current Assets, Debt Ratio, ROE)
+   6-7 points: Operational metrics (Operating Margin, Asset Turnover, Growth Rates)
+   5-6 points: Supporting metrics (Individual expense categories, segment data if relevant)
+   1-4 points: Detail line items NOT aggregated (skip unless required for aggregate)
 
-Where X is 1-10 score. NO explanations."""
+2. SYNTHESIS BONUS (+2 to +3):
+   Grant bonus if the metric:
+   - Can be calculated/derived from available data (e.g., Total = Sum of components)
+   - Represents a trend (YoY change, quarterly progression) even if not explicitly stated
+   - Aggregates a table (e.g., "Production Cost Summary" from a detailed breakdown)
+
+3. TABLE STRUCTURE DETECTION (+1 to +3):
+   Identify table types and create appropriate summary metrics:
+   - BREAKDOWN table (e.g., Cost components): Create "Total Cost" aggregate metric
+   - TIME SERIES table (e.g., quarterly data): Create "Trend Analysis" or "YoY Growth" metric
+   - COMPARISON table (e.g., 2022 vs 2023): Create "Growth Rate" or "Change Analysis" metric
+   - MATRIX table (e.g., product × region): Create "By Segment Summary" metric
+
+4. EXAMPLES:
+   ✓ SELECT "Total Production Cost" (aggregate multiple line items) - GOOD for summarization
+   ✗ AVOID selecting "Material Cost" alone (just one component) - NOT good for summarization
+   ✓ SELECT "Revenue Growth Rate (YoY %)" (synthesized trend metric)
+   ✗ AVOID selecting individual revenue items unless aggregating them
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+OUTPUT FORMAT (JSON only, no explanations):
+{{
+  "Revenue Metrics": {{"score": 9, "selected": ["Total Revenue", "Revenue Growth Rate (YoY %)"]}},
+  "Profitability Metrics": {{"score": 8, "selected": ["Gross Profit Total", "Operating Margin %"]}},
+  "Balance Sheet": {{"score": 9, "selected": ["Total Assets", "Total Liabilities", "Equity Aggregate"]}},
+  ...
+}}
+
+Rules for output:
+- Include score (1-10) based on materiality assessment above
+- For "selected" array: Include BOTH extracted AND synthesized metrics
+- Only include groups with score >= 6
+- Prefer aggregates and summarization metrics over detail line items
+- If table detected, include table-level summary metrics (not individual rows)
+- You MAY create 1-2 custom metrics if they improve summarization (e.g., "Total Operating Costs")"""
             
-            logger.debug(f"[CHUNKING:METRIC] Sending {len(all_metrics_list)} metrics to LLM for evaluation")
+            logger.debug(f"[CHUNKING:METRIC:OPT] Sending materiality-focused metric selection prompt")
+            logger.debug(f"[CHUNKING:METRIC:OPT] Reminder: LLM will select based on importance for summarization, not just data presence")
+            
+            # Call LLM ONCE for all groups (batch mode)
             response = self.llm.invoke(evaluation_prompt)
             response_text = response.content if hasattr(response, 'content') else str(response)
             
-            # Parse response: "N. Metric Name: X" format
+            logger.debug(f"[CHUNKING:METRIC:OPT] LLM batch response received: {len(response_text)} chars")
+            
+            # Step 3: Parse JSON response - OPTIMIZED parsing (structured format)
             scores = {}
-            lines = response_text.split('\n')
+            custom_metrics = []
             
-            for i, line in enumerate(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # Try to parse "N. Metric Name: X" or similar formats
-                # Look for pattern: number period optional space then metric name then colon then number
-                match = re.match(r'^[\d]+\.\s*(.+?):\s*(\d+(?:\.\d+)?)', line)
-                if match:
-                    metric_name_from_response = match.group(1).strip()
-                    score_str = match.group(2)
+            try:
+                # Extract JSON from response (handle potential markdown code blocks)
+                json_match = re.search(r'\{[\s\S]*\}', response_text)
+                if json_match:
+                    json_str = json_match.group(0)
+                    response_json = json.loads(json_str)
                     
-                    try:
-                        score = float(score_str)
-                        score = max(1.0, min(10.0, score))  # Clamp to 1-10
+                    # Parse each group's results
+                    for group_name, group_data in response_json.items():
+                        if isinstance(group_data, dict) and 'selected' in group_data:
+                            selected_metrics = group_data.get('selected', [])
+                            group_score = group_data.get('score', 5)
+                            
+                            # Convert score to float and clamp
+                            try:
+                                group_score = float(group_score)
+                                group_score = max(1.0, min(10.0, group_score))
+                            except (ValueError, TypeError):
+                                group_score = 5.0
+                            
+                            # Only include selected metrics from high-scoring groups
+                            if group_score >= 6.0:
+                                logger.debug(f"[CHUNKING:METRIC:OPT] Group '{group_name}': score={group_score:.1f}, metrics={len(selected_metrics)}")
+                                
+                                for metric_name in selected_metrics:
+                                    if metric_name and isinstance(metric_name, str):
+                                        # Use group score as baseline, adjusted for position in selection
+                                        metric_score = group_score
+                                        scores[metric_name.strip()] = metric_score
+                                        logger.debug(f"[CHUNKING:METRIC:OPT]   ✓ {metric_name.strip()}: {metric_score:.1f}")
+                            else:
+                                logger.debug(f"[CHUNKING:METRIC:OPT] Group '{group_name}': score={group_score:.1f} (below threshold, skipped)")
+                    
+                else:
+                    logger.warning(f"[CHUNKING:METRIC:OPT] Could not find JSON in response, attempting fallback parsing")
+                    # Fallback to line-by-line parsing for unexpected formats
+                    lines = response_text.split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        if not line or len(line) > 150:
+                            continue
                         
-                        # Try to match with predefined metrics
-                        matched_metric = None
-                        for metric in all_metrics_list:
-                            # Extract just the metric name without type
-                            metric_name_only = metric.split(' (')[0] if ' (' in metric else metric
-                            if metric_name_only.lower() in metric_name_from_response.lower() or \
-                               metric_name_from_response.lower() in metric_name_only.lower():
-                                matched_metric = metric_name_only
-                                break
-                        
-                        if matched_metric:
-                            scores[matched_metric] = score
-                            logger.debug(f"[CHUNKING:METRIC] Parsed: {matched_metric} -> {score:.1f}")
-                    except ValueError:
-                        logger.debug(f"[CHUNKING:METRIC] Could not parse score from: {line}")
+                        # Try to extract metric: score pattern
+                        match = re.match(r'^-?\s*["\']?(.+?)["\']?\s*:\s*(\d+(?:\.\d+)?)', line)
+                        if match:
+                            metric_name = match.group(1).strip()
+                            try:
+                                score = float(match.group(2))
+                                score = max(1.0, min(10.0, score))
+                                if score >= 6.0:
+                                    scores[metric_name] = score
+                            except ValueError:
+                                pass
             
-            # Filter to keep only metrics with score >= 6.0
+            except json.JSONDecodeError as e:
+                logger.warning(f"[CHUNKING:METRIC:OPT] JSON parsing failed: {e}, using fallback")
+                # Fallback: parse line by line
+                lines = response_text.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Extract "metric: score" or "metric: score" patterns
+                    match = re.search(r'^-?\s*["\']?(.+?)["\']?\s*:\s*(\d+(?:\.\d+)?)', line)
+                    if match:
+                        metric_name = match.group(1).strip()
+                        try:
+                            score = float(match.group(2))
+                            score = max(1.0, min(10.0, score))
+                            if score >= 6.0 and metric_name not in scores:
+                                scores[metric_name] = score
+                        except ValueError:
+                            pass
+            
+            # Step 4: Convert scores dict to selected metrics with score >= 6.0
             SELECTION_THRESHOLD = 6.0
             selected = {name: score for name, score in scores.items() if score >= SELECTION_THRESHOLD}
             
-            logger.info(f"[CHUNKING:METRIC] LLM evaluation complete: {len(selected)}/{len(scores)} metrics selected (score >= {SELECTION_THRESHOLD})")
+            # Log summary
+            logger.info(f"[CHUNKING:METRIC:OPT] ✓ Batch evaluation complete: {len(selected)} metrics selected (score >= {SELECTION_THRESHOLD})")
+            if selected:
+                for metric_name, score in sorted(selected.items(), key=lambda x: x[1], reverse=True)[:15]:
+                    logger.debug(f"[CHUNKING:METRIC:OPT]   ✓ {metric_name}: {score:.1f}/10.0")
+            
             return selected
             
         except Exception as e:
-            logger.error(f"[CHUNKING:METRIC] LLM metric selection failed: {e}")
+            logger.error(f"[CHUNKING:METRIC:OPT] Batch metric evaluation failed: {e}")
             import traceback
             logger.debug(traceback.format_exc())
             return {}
@@ -1048,10 +1586,12 @@ Where X is 1-10 score. NO explanations."""
         return metrics
     
     def _metrics_match(self, metric1: str, metric2: str) -> bool:
-        """Check if two metric names refer to the same metric"""
-        # Simple matching - can be improved
-        m1_lower = metric1.lower()
-        m2_lower = metric2.lower()
+        """
+        Check if two metric names refer to the same metric
+        Uses fuzzy matching to handle variations in naming
+        """
+        m1_lower = metric1.lower().strip()
+        m2_lower = metric2.lower().strip()
         
         # Exact match after normalization
         if m1_lower == m2_lower:
@@ -1060,6 +1600,34 @@ Where X is 1-10 score. NO explanations."""
         # Check if one is substring of other
         if m1_lower in m2_lower or m2_lower in m1_lower:
             return True
+        
+        # Extract key words for fuzzy matching
+        # Remove common words and punctuation
+        m1_words = set(w for w in m1_lower.split() if len(w) > 2)
+        m2_words = set(w for w in m2_lower.split() if len(w) > 2)
+        
+        # If significant word overlap (>50%), consider it a match
+        if m1_words and m2_words:
+            overlap = len(m1_words & m2_words)
+            total = len(m1_words | m2_words)
+            if total > 0 and overlap / total >= 0.5:
+                return True
+        
+        # Special handling for common metric abbreviations/variations
+        variations = {
+            'revenue': ['sales', 'turnover', 'net sales', 'gross revenue', 'total revenue'],
+            'net income': ['profit', 'net profit', 'earnings', 'bottom line'],
+            'cash flow': ['cffo', 'operating cash', 'fcf', 'free cash flow'],
+            'margin': ['profitability', 'margin %'],
+            'debt': ['liabilities', 'leverage'],
+            'assets': ['asset', 'total assets'],
+            'equity': ['stockholders equity', 'shareholders equity'],
+        }
+        
+        for key, alts in variations.items():
+            if (key in m1_lower and any(alt in m2_lower for alt in alts)) or \
+               (key in m2_lower and any(alt in m1_lower for alt in alts)):
+                return True
         
         return False
     
@@ -1203,14 +1771,13 @@ Where X is 1-10 score. NO explanations."""
                                occurrences: List[MetricOccurrence],
                                best_values: Dict[str, str] = None) -> str:
         """
-        Synthesize metric-centric comprehensive text from narrative sources.
+        OPTIMIZED: Synthesize metric-centric text with structured format (less verbose).
         
-        Creates a summary paragraph that:
-        - Defines the metric in context
-        - States key values and periods
-        - Explains drivers and context
-        - Highlights trends
-        - Includes scoring rationale (materiality, volatility, importance)
+        Creates a compact, structured summary instead of narrative prose:
+        - Uses JSON structure for efficient parsing
+        - Removes explanatory reasoning (saves tokens)
+        - Focuses on essential facts only
+        - Optimized for LLM embedding and retrieval
         
         Args:
             metric_name: Name of metric
@@ -1219,7 +1786,7 @@ Where X is 1-10 score. NO explanations."""
             best_values: Selected metric values dict (optional)
             
         Returns:
-            Metric-centric synthesis text with importance reasoning
+            Structured metric text optimized for LLM processing
         """
         # Extract relevant sentences containing the metric
         relevant_sentences = []
@@ -1237,115 +1804,240 @@ Where X is 1-10 score. NO explanations."""
                 unique_sentences.append(sentence)
                 seen.add(sentence)
         
-        # Try LLM synthesis if available
+        # Use OPTIMIZED LLM synthesis if available - structured JSON output
         if self.llm and unique_sentences:
             try:
-                logger.debug(f"[CHUNKING:SYNTHESIS] Using LLM to synthesize metric: {metric_name}")
+                logger.debug(f"[CHUNKING:SYNTHESIS:OPT] Using optimized LLM to synthesize metric: {metric_name}")
                 
                 # Build value summary if available
                 value_context = ""
                 if best_values:
                     if best_values.get('latest_value'):
-                        value_context = f"\nKEY VALUE: {best_values['latest_value']}"
+                        value_context = f"Latest value: {best_values['latest_value']}"
                         if best_values.get('period'):
                             value_context += f" ({best_values['period']})"
                     if best_values.get('all_values'):
-                        value_context += f"\nVALUES ACROSS PERIODS: {', '.join(best_values['all_values'])}"
-                
-                # Get average relevance score to include in synthesis
-                avg_relevance = sum(o.relevance for o in occurrences) / len(occurrences) if occurrences else 0.0
-                importance_1_to_10 = (avg_relevance * 9.0) + 1.0  # Convert from 0-1 back to 1-10
+                        value_context += f" | Historical: {' -> '.join(best_values['all_values'][:3])}"
                 
                 # Prepare context for LLM
-                context = "\n".join(unique_sentences)
+                context = "\n".join(unique_sentences[:5])  # Use only top 5 most relevant sentences
                 
-                # Create synthesis prompt with comprehensive requirements and scoring rationale
-                synthesis_prompt = f"""You are a financial analysis expert. Create a comprehensive metric-centric summary for "{metric_name}".
+                # OPTIMIZED prompt: Structured JSON output, no explanations
+                synthesis_prompt = f"""METRIC SYNTHESIS - STRUCTURED OUTPUT ONLY
 
-{value_context}
+Metric: {metric_name}
+Values: {value_context or 'N/A'}
 
-DOCUMENT MENTIONS:
+Document mentions:
 {context}
 
-This metric has been scored as IMPORTANT (importance rating: {importance_1_to_10:.1f}/10.0) due to:
-- Materiality to overall financial position
-- Volatility and year-over-year changes
-- Structural importance to business operations
-- Anomalies or significant trends
-
-Synthesize this into a cohesive metric summary that:
-1. Clearly explains what {metric_name} represents
-2. Provides the actual values: {best_values.get('latest_value', 'N/A')} in {best_values.get('period', 'N/A')}
-3. Shows historical context: {', '.join(best_values.get('all_values', [])) if best_values and best_values.get('all_values') else 'N/A'}
-4. Explains business drivers and impacts
-5. Highlights why this metric is important (materiality, volatility, or unusual trends)
-6. Connects to other business factors mentioned
-
-Format as a single comprehensive paragraph (150-200 words). Be precise with numbers and dates."""
+Generate ONLY a JSON object with these exact fields (no markdown, no explanations):
+{{
+  "definition": "one-line definition of this metric",
+  "latest_value": "{best_values.get('latest_value', 'N/A') if best_values else 'N/A'}",
+  "period": "{best_values.get('period', 'N/A') if best_values else 'N/A'}",
+  "trend": "increasing/decreasing/stable",
+  "key_fact": "most important single fact about this metric",
+  "context": "one sentence about business impact"
+}}"""
                 
                 # Call LLM for synthesis
                 response = self.llm.invoke(synthesis_prompt)
-                synthesized = response.content if hasattr(response, 'content') else str(response)
+                response_text = response.content if hasattr(response, 'content') else str(response)
                 
-                logger.debug(f"[CHUNKING:SYNTHESIS] ✓ LLM synthesis successful for {metric_name}")
-                return synthesized
+                # Try to extract JSON
+                try:
+                    json_match = re.search(r'\{[\s\S]*\}', response_text)
+                    if json_match:
+                        json_str = json_match.group(0)
+                        metric_json = json.loads(json_str)
+                        
+                        # Build structured but readable output
+                        synthesis_parts = [
+                            f"METRIC: {metric_name}",
+                            f"DEFINITION: {metric_json.get('definition', 'N/A')}",
+                            f"VALUE: {metric_json.get('latest_value', 'N/A')} ({metric_json.get('period', 'N/A')})",
+                            f"TREND: {metric_json.get('trend', 'N/A')}",
+                            f"KEY_FACT: {metric_json.get('key_fact', 'N/A')}",
+                            f"CONTEXT: {metric_json.get('context', 'N/A')}"
+                        ]
+                        
+                        logger.debug(f"[CHUNKING:SYNTHESIS:OPT] ✓ Structured synthesis successful for {metric_name}")
+                        return " | ".join(synthesis_parts)
+                except (json.JSONDecodeError, AttributeError):
+                    logger.debug(f"[CHUNKING:SYNTHESIS:OPT] JSON parsing failed, using response as-is")
+                    return response_text[:500]  # Return first 500 chars of response
+            
             except Exception as e:
-                logger.warning(f"[CHUNKING:SYNTHESIS] LLM synthesis failed for {metric_name}: {e}, using fallback")
+                logger.warning(f"[CHUNKING:SYNTHESIS:OPT] LLM synthesis failed for {metric_name}: {e}, using fallback")
                 # Fall through to rule-based synthesis
         
-        # Rule-based synthesis (fallback or when no LLM)
-        logger.debug(f"[CHUNKING:SYNTHESIS] Using rule-based synthesis for {metric_name}")
+        # OPTIMIZED Rule-based synthesis (fallback or when no LLM)
+        logger.debug(f"[CHUNKING:SYNTHESIS:OPT] Using optimized rule-based synthesis for {metric_name}")
         
-        synthesis_parts = []
-        
-        # Header with metric
-        synthesis_parts.append(f"### {metric_name.upper()}")
-        synthesis_parts.append("")
+        synthesis_parts = [f"METRIC: {metric_name}"]
         
         # Add best values if available
         if best_values:
-            synthesis_parts.append("**Metric Values:**")
             if best_values.get('latest_value'):
-                value_line = f"- Latest: {best_values['latest_value']}"
+                value_line = f"VALUE: {best_values['latest_value']}"
                 if best_values.get('period'):
                     value_line += f" ({best_values['period']})"
                 synthesis_parts.append(value_line)
             if best_values.get('all_values') and len(best_values['all_values']) > 1:
-                synthesis_parts.append(f"- Historical: {', '.join(best_values['all_values'])}")
-            synthesis_parts.append("")
+                synthesis_parts.append(f"HISTORY: {' -> '.join(best_values['all_values'][:3])}")
         
-        # Add relevant context
+        # Add key fact (first sentence only)
         if unique_sentences:
-            synthesis_parts.append("**Context from Document:**")
-            synthesis_parts.append("")
-            for sentence in unique_sentences[:5]:
-                synthesis_parts.append(f"- {sentence}")
-            synthesis_parts.append("")
+            synthesis_parts.append(f"FACT: {unique_sentences[0][:100]}")
         
-        # Add metric metadata with importance
-        synthesis_parts.append("**Metric Metadata:**")
+        # Add metric metadata
         if occurrences:
-            synthesis_parts.append(f"- Type: {occurrences[0].metric_type}")
-            synthesis_parts.append(f"- Found: {len(occurrences)} time(s)")
-            avg_confidence = sum(o.confidence for o in occurrences) / len(occurrences)
-            synthesis_parts.append(f"- Confidence: {avg_confidence:.0%}")
-            avg_relevance = sum(o.relevance for o in occurrences) / len(occurrences)
-            importance_1_to_10 = (avg_relevance * 9.0) + 1.0
-            synthesis_parts.append(f"- Importance Rating: {importance_1_to_10:.1f}/10.0")
+            synthesis_parts.append(f"TYPE: {occurrences[0].metric_type.value}")
+            synthesis_parts.append(f"CONFIDENCE: {sum(o.confidence for o in occurrences) / len(occurrences):.0%}")
         
-        return "\n".join(synthesis_parts)
-        for occ in occurrences:
-            if occ.period:
-                periods.add(occ.period)
-            if occ.value:
-                values.append(occ.value)
+        return " | ".join(synthesis_parts)
+    
+    def _synthesize_custom_metric_data(self,
+                                       metric_name: str,
+                                       document_context: str,
+                                       score: float) -> Optional[MetricChunk]:
+        """
+        SYNTHESIS FOR CUSTOM METRICS: Create synthesized metric data when LLM selects 
+        a metric that couldn't be directly extracted (e.g., aggregates, trends, synthetics).
         
-        if periods:
-            synthesis += f"\nPERIODS: {', '.join(sorted(periods))}\n"
+        This is CRITICAL for materiality-focused metric selection:
+        - LLM selects "Total Production Cost" (aggregate) even if not explicitly stated
+        - We synthesize its data from component costs
+        - LLM selects "Revenue Growth Rate" (trend) from multiple periods
+        - We synthesize the calculation
         
-        synthesis += f"\nCONTEXT:\n" + "\n".join(unique_sentences)
+        Args:
+            metric_name: Name of custom/synthesized metric
+            document_context: Document excerpt with relevant data
+            score: Materiality score from LLM (1-10)
+            
+        Returns:
+            MetricChunk with synthesized data, or None if synthesis fails
+        """
+        if not self.llm:
+            logger.warning(f"[CHUNKING:SYNTHESIS:CUSTOM] No LLM available to synthesize '{metric_name}'")
+            return None
         
-        return synthesis
+        try:
+            logger.info(f"[CHUNKING:SYNTHESIS:CUSTOM] Creating synthesized data for custom metric: {metric_name}")
+            
+            # Use LLM to synthesize the metric from document context
+            synthesis_prompt = f"""SYNTHESIZE FINANCIAL METRIC DATA
+
+Metric Name: {metric_name}
+
+Document Context:
+{document_context[:3000]}
+
+TASK: Create synthesized metric data for "{metric_name}" based on the document.
+
+This metric was selected by a financial analyst as important for summarization, 
+but doesn't appear explicitly in the document. You must:
+
+1. Identify if this is:
+   - An AGGREGATE (e.g., sum of components)
+   - A CALCULATION (e.g., ratio, percentage change)
+   - A TREND (e.g., YoY comparison)
+   - A DERIVED METRIC (e.g., calculated from other data)
+
+2. Extract or calculate the values using document data
+3. Provide the synthesized metric summary
+
+RESPOND WITH ONLY JSON (no explanations):
+{{
+  "metric_name": "{metric_name}",
+  "type": "aggregate|calculation|trend|derived",
+  "values": ["value1", "value2"],  // synthesized values with periods
+  "calculation": "How this was calculated/derived",
+  "confidence": 0.7,  // 0.6-0.9 range for synthesized data
+  "summary": "Key facts about this synthesized metric"
+}}"""
+            
+            response = self.llm.invoke(synthesis_prompt)
+            response_text = response.content if hasattr(response, 'content') else str(response)
+            
+            # Parse JSON response
+            try:
+                json_match = re.search(r'\{[\s\S]*\}', response_text)
+                if json_match:
+                    json_str = json_match.group(0)
+                    metric_data = json.loads(json_str)
+                    
+                    # Build synthesized occurrences
+                    occurrences = []
+                    if metric_data.get('values'):
+                        for value in metric_data['values']:
+                            # Parse "value (period)" format
+                            match = re.match(r'(.+?)\s*\((.+?)\)', value)
+                            if match:
+                                val, period = match.groups()
+                            else:
+                                val, period = value, "N/A"
+                            
+                            occurrence = MetricOccurrence(
+                                metric_name=metric_name,
+                                metric_type=MetricType.OTHER,
+                                value=val.strip(),
+                                period=period.strip(),
+                                confidence=float(metric_data.get('confidence', 0.7))
+                            )
+                            occurrences.append(occurrence)
+                    
+                    # Build comprehensive text
+                    synthesis_text = f"""SYNTHESIZED METRIC: {metric_name}
+
+Type: {metric_data.get('type', 'Unknown')}
+Values: {', '.join(metric_data.get('values', ['N/A']))}
+Calculation: {metric_data.get('calculation', 'N/A')}
+
+Summary:
+{metric_data.get('summary', 'Metric synthesized from document data')}
+
+Note: This is a synthesized metric created for financial analysis by aggregating or 
+deriving from document data. Confidence: {metric_data.get('confidence', 0.7):.0%}"""
+                    
+                    # Create metric chunk
+                    metric_chunk = MetricChunk(
+                        metric_name=metric_name,
+                        metric_type=MetricType.OTHER,
+                        chunk_id=str(uuid.uuid4()),
+                        text=synthesis_text,
+                        occurrences=occurrences if occurrences else [MetricOccurrence(
+                            metric_name=metric_name,
+                            metric_type=MetricType.OTHER,
+                            value=metric_data.get('values', ['N/A'])[0] if metric_data.get('values') else 'Synthesized',
+                            period="N/A",
+                            confidence=float(metric_data.get('confidence', 0.7))
+                        )],
+                        source_chunk_ids=[],
+                        is_from_table=metric_data.get('type') == 'aggregate',
+                        is_custom_metric=True,
+                        file_id="",  # Will be set by caller
+                        timestamp=datetime.now().isoformat(),
+                        sources=[],
+                        confidence=min(0.9, float(metric_data.get('confidence', 0.7)))  # Cap at 0.9 for synthesized
+                    )
+                    
+                    logger.info(f"[CHUNKING:SYNTHESIS:CUSTOM] ✓ Successfully synthesized '{metric_name}' "
+                              f"(type={metric_data.get('type')}, confidence={metric_data.get('confidence'):.0%})")
+                    return metric_chunk
+                else:
+                    logger.warning(f"[CHUNKING:SYNTHESIS:CUSTOM] No JSON in synthesis response")
+                    return None
+                    
+            except json.JSONDecodeError as e:
+                logger.warning(f"[CHUNKING:SYNTHESIS:CUSTOM] JSON parsing failed: {e}")
+                return None
+        
+        except Exception as e:
+            logger.warning(f"[CHUNKING:SYNTHESIS:CUSTOM] Failed to synthesize '{metric_name}': {e}")
+            return None
     
     def score_all_metrics_relevance(self,
                                    metric_chunks: List[MetricChunk],

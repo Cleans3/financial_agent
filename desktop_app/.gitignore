@@ -1,0 +1,16 @@
+# Electron app files
+node_modules/
+dist/
+build/
+out/
+*.log
+*.swp
+.DS_Store
+Thumbs.db
+
+# Development
+.env.local
+.env.development.local
+
+# Build output
+release/

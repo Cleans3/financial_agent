@@ -74,8 +74,15 @@ const AdminDashboard = ({ user, onLogout, onClose }) => {
 
   const toggleUserActive = async (userId, currentStatus) => {
     try {
-      await api.post(`/admin/users/${userId}/toggle-active`)
-      fetchUsers()
+      const newStatus = !currentStatus
+      await api.post(`/admin/users/${userId}/toggle-active`, {}, {
+        params: { is_active: newStatus }
+      })
+      // Update local state immediately
+      setUsers(users.map(u => 
+        u.id === userId ? { ...u, is_active: newStatus } : u
+      ))
+      setError(null)
     } catch (err) {
       setError('Failed to toggle user status')
       console.error(err)
@@ -83,10 +90,12 @@ const AdminDashboard = ({ user, onLogout, onClose }) => {
   }
 
   const deleteUserData = async (userId) => {
-    if (!confirm('Are you sure you want to delete this user\'s data?')) return
+    if (!confirm('Are you sure you want to delete this user\'s data? This action cannot be undone.')) return
     try {
       await api.delete(`/admin/users/${userId}/data`)
-      fetchUsers()
+      // Remove the deleted user from the UI
+      setUsers(users.filter(u => u.id !== userId))
+      setError(null)
     } catch (err) {
       setError('Failed to delete user data')
       console.error(err)
@@ -172,37 +181,64 @@ const AdminDashboard = ({ user, onLogout, onClose }) => {
               <div className="text-center py-12">Loading...</div>
             ) : stats ? (
               <>
-                {/* Stats Cards */}
+                {/* Key Stats Cards */}
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                   <StatCard
                     title="Total Users"
-                    value={stats.total_users}
+                    value={stats.users?.total || 0}
                     icon="👥"
+                    color="blue"
                   />
                   <StatCard
-                    title="Active Sessions"
-                    value={stats.active_sessions}
+                    title="Active Users"
+                    value={stats.users?.active || 0}
+                    icon="✅"
+                    color="green"
+                  />
+                  <StatCard
+                    title="Total Sessions"
+                    value={stats.sessions?.total || 0}
                     icon="🔄"
+                    color="purple"
                   />
                   <StatCard
                     title="Total Documents"
-                    value={stats.total_documents}
+                    value={0}
                     icon="📄"
-                  />
-                  <StatCard
-                    title="RAG Adoption Rate"
-                    value={`${(stats.rag_adoption_rate * 100).toFixed(1)}%`}
-                    icon="📊"
+                    color="yellow"
                   />
                 </div>
 
-                {/* Charts */}
-                {ragStats && (
+                {/* Secondary Stats */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <StatCard
+                    title="Admin Users"
+                    value={stats.users?.admins || 0}
+                    icon="👨‍💼"
+                    color="red"
+                  />
+                  <StatCard
+                    title="RAG Adoption"
+                    value={`${((stats.sessions?.rag_adoption || 0) * 100).toFixed(1)}%`}
+                    icon="📊"
+                    color="indigo"
+                  />
+                  <StatCard
+                    title="Active Sessions"
+                    value={stats.sessions?.active || 0}
+                    icon="⚡"
+                    color="cyan"
+                  />
+                </div>
+
+                {/* Charts Section */}
+                {ragStats && ragStats.queries_by_type && Object.values(ragStats.queries_by_type).some(val => val > 0) ? (
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {/* Queries by Type - Bar Chart */}
                     <div className="bg-gray-800 p-6 rounded-lg border border-gray-700">
-                      <h3 className="text-lg font-semibold mb-4">Queries by Type</h3>
+                      <h3 className="text-lg font-semibold mb-4">📊 Queries by Type</h3>
                       <ResponsiveContainer width="100%" height={300}>
-                        <BarChart data={Object.entries(ragStats.queries_by_type || {}).map(([key, val]) => ({
+                        <BarChart data={Object.entries(ragStats.queries_by_type).map(([key, val]) => ({
                           name: key,
                           count: val
                         }))}>
@@ -218,12 +254,13 @@ const AdminDashboard = ({ user, onLogout, onClose }) => {
                       </ResponsiveContainer>
                     </div>
 
+                    {/* Usage Distribution - Pie Chart */}
                     <div className="bg-gray-800 p-6 rounded-lg border border-gray-700">
-                      <h3 className="text-lg font-semibold mb-4">Usage Distribution</h3>
+                      <h3 className="text-lg font-semibold mb-4">🥧 Usage Distribution</h3>
                       <ResponsiveContainer width="100%" height={300}>
                         <PieChart>
                           <Pie
-                            data={Object.entries(ragStats.queries_by_type || {}).map(([key, val]) => ({
+                            data={Object.entries(ragStats.queries_by_type).map(([key, val]) => ({
                               name: key,
                               value: val
                             }))}
@@ -246,7 +283,30 @@ const AdminDashboard = ({ user, onLogout, onClose }) => {
                       </ResponsiveContainer>
                     </div>
                   </div>
-                )}
+                ) : null}
+
+                {/* System Info Card */}
+                <div className="bg-gray-800 p-6 rounded-lg border border-gray-700">
+                  <h3 className="text-lg font-semibold mb-4">ℹ️ System Information</h3>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div className="border-l-4 border-blue-500 pl-4">
+                      <p className="text-gray-400">Total Messages</p>
+                      <p className="text-2xl font-bold">{stats.messages?.total || 0}</p>
+                    </div>
+                    <div className="border-l-4 border-green-500 pl-4">
+                      <p className="text-gray-400">Messages (24h)</p>
+                      <p className="text-2xl font-bold">{stats.messages?.last_24h || 0}</p>
+                    </div>
+                    <div className="border-l-4 border-yellow-500 pl-4">
+                      <p className="text-gray-400">Avg Msg/Session</p>
+                      <p className="text-2xl font-bold">{(stats.messages?.avg_per_session || 0).toFixed(1)}</p>
+                    </div>
+                    <div className="border-l-4 border-purple-500 pl-4">
+                      <p className="text-gray-400">Inactive Users</p>
+                      <p className="text-2xl font-bold">{(stats.users?.total || 0) - (stats.users?.active || 0)}</p>
+                    </div>
+                  </div>
+                </div>
               </>
             ) : null}
           </div>
@@ -364,16 +424,28 @@ const AdminDashboard = ({ user, onLogout, onClose }) => {
   )
 }
 
-const StatCard = ({ title, value, icon }) => (
-  <div className="bg-gray-800 border border-gray-700 rounded-lg p-6 hover:border-gray-600 transition">
-    <div className="flex items-center justify-between">
-      <div>
-        <p className="text-gray-400 text-sm font-medium">{title}</p>
-        <p className="text-3xl font-bold mt-2">{value}</p>
+const StatCard = ({ title, value, icon, color = 'blue' }) => {
+  const colorClasses = {
+    blue: 'border-blue-500 hover:bg-blue-900/20',
+    green: 'border-green-500 hover:bg-green-900/20',
+    red: 'border-red-500 hover:bg-red-900/20',
+    yellow: 'border-yellow-500 hover:bg-yellow-900/20',
+    purple: 'border-purple-500 hover:bg-purple-900/20',
+    indigo: 'border-indigo-500 hover:bg-indigo-900/20',
+    cyan: 'border-cyan-500 hover:bg-cyan-900/20'
+  }
+  
+  return (
+    <div className={`bg-gray-800 border-l-4 ${colorClasses[color]} rounded-lg p-6 hover:border-gray-600 transition`}>
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-gray-400 text-sm font-medium">{title}</p>
+          <p className="text-3xl font-bold mt-2">{value}</p>
+        </div>
+        <div className="text-4xl opacity-80">{icon}</div>
       </div>
-      <div className="text-4xl">{icon}</div>
     </div>
-  </div>
-)
+  )
+}
 
 export default AdminDashboard

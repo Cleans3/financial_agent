@@ -10,9 +10,9 @@ logger = logging.getLogger(__name__)
 
 class FileIngestionService:
     
-    def __init__(self):
+    def __init__(self, llm=None):
         self.pipeline = FileProcessingPipeline()
-        self.rag_service = MultiCollectionRAGService()
+        self.rag_service = MultiCollectionRAGService(llm=llm)
     
     def ingest_file(
         self,
