@@ -4,6 +4,484 @@
 
 ---
 
+## 📚 Table of Contents
+
+- [Quick Start](#quick-start)
+- [System Requirements](#system-requirements)
+- [Installation Guide](#installation-guide)
+- [Database Setup](#database-setup)
+- [Environment Configuration](#environment-configuration)
+- [Running the Application](#running-the-application)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+
+---
+
+## ⚡ Quick Start
+
+### Minimum Setup (5 minutes)
+
+```bash
+# 1. Clone and navigate to project
+git clone <repo-url>
+cd financial_agent_fork
+
+# 2. Create Python virtual environment
+python -m venv venv
+.\venv\Scripts\activate  # Windows
+source venv/bin/activate  # macOS/Linux
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Copy environment template
+cp .env.example .env
+# Edit .env with your settings
+
+# 5. Setup database (PostgreSQL required)
+# See Database Setup section below
+
+# 6. Run the API server
+python main.py
+```
+
+Visit `http://localhost:8000/docs` to test the API.
+
+---
+
+## 🖥️ System Requirements
+
+### Minimum Requirements
+
+- **Python**: 3.9 or higher
+- **RAM**: 8GB minimum (16GB recommended)
+- **Disk Space**: 5GB free space
+- **OS**: Windows 10+, macOS 10.14+, or Linux
+
+### External Services Required
+
+1. **PostgreSQL Database** (v12 or higher)
+   - Local installation or cloud service (AWS RDS, Azure Database, etc.)
+   - At least 2GB storage recommended
+
+2. **LLM Provider** (choose one)
+   - **Google Gemini**: Free API key from [Google AI Studio](https://aistudio.google.com/apikey)
+   - **Ollama**: Local LLM server (free, no API key needed)
+
+3. **Qdrant Vector Database** (choose one)
+   - **Qdrant Cloud**: Free tier available at [cloud.qdrant.io](https://cloud.qdrant.io)
+   - **Qdrant Local**: Docker container or local installation
+
+4. **Optional: Tesseract OCR**
+   - Required only for processing scanned PDF documents
+   - [Installation Guide](https://github.com/UB-Mannheim/tesseract/wiki)
+
+---
+
+## 📦 Installation Guide
+
+### Step 1: Clone Repository
+
+```bash
+git clone <repository-url>
+cd financial_agent_fork
+```
+
+### Step 2: Python Environment Setup
+
+```bash
+# Windows
+python -m venv venv
+.\venv\Scripts\activate
+
+# macOS/Linux
+python -m venv venv
+source venv/bin/activate
+```
+
+Verify Python version:
+```bash
+python --version  # Should be 3.9 or higher
+```
+
+### Step 3: Install Dependencies
+
+```bash
+# Upgrade pip
+python -m pip install --upgrade pip
+
+# Install all required packages
+pip install -r requirements.txt
+```
+
+**Installation may take 5-10 minutes due to native dependencies**
+
+#### Optional: Install Tesseract OCR
+
+For processing scanned PDFs and images:
+
+**Windows:**
+```bash
+# Download installer from:
+# https://github.com/UB-Mannheim/tesseract/wiki/Downloads
+# Then run setup and add to your .env:
+TESSERACT_PATH=C:\Program Files\Tesseract-OCR\tesseract.exe
+```
+
+**macOS:**
+```bash
+brew install tesseract
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt-get install tesseract-ocr
+```
+
+### Step 4: Verify Installation
+
+```bash
+python -c "import langchain; print('✓ LangChain installed')"
+python -c "import fastapi; print('✓ FastAPI installed')"
+python -c "import vnstock; print('✓ VnStock installed')"
+python -c "import qdrant_client; print('✓ Qdrant client installed')"
+```
+
+---
+
+## 🗄️ Database Setup
+
+This project uses **PostgreSQL** as the primary relational database, with **Qdrant** as the vector database for RAG features.
+
+### PostgreSQL Setup
+
+#### Option 1: Local Installation (Recommended for Development)
+
+**Windows:**
+
+1. Download PostgreSQL from [postgresql.org](https://www.postgresql.org/download/windows/)
+2. Run the installer and follow the installation wizard
+3. Remember the superuser password
+4. Verify installation:
+   ```bash
+   psql --version
+   ```
+
+5. Connect to PostgreSQL:
+   ```bash
+   psql -U postgres
+   ```
+
+**macOS:**
+
+```bash
+# Using Homebrew
+brew install postgresql@15
+
+# Start PostgreSQL service
+brew services start postgresql@15
+
+# Connect to PostgreSQL
+psql postgres
+```
+
+**Linux (Ubuntu/Debian):**
+
+```bash
+# Update package list
+sudo apt-get update
+
+# Install PostgreSQL
+sudo apt-get install postgresql postgresql-contrib
+
+# Start PostgreSQL service
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+
+# Connect to PostgreSQL
+sudo -u postgres psql
+```
+
+#### Option 2: Docker Container (Recommended for Production)
+
+```bash
+# Run PostgreSQL container
+docker run --name financial-db \
+  -e POSTGRES_USER=financial_user \
+  -e POSTGRES_PASSWORD=financial_password \
+  -e POSTGRES_DB=financial_agent \
+  -p 5432:5432 \
+  -v postgres_data:/var/lib/postgresql/data \
+  -d postgres:15
+
+# Verify container is running
+docker ps
+```
+
+#### Create Database and User
+
+```bash
+# Connect to PostgreSQL
+psql -U postgres
+
+# Inside psql shell:
+CREATE USER financial_user WITH PASSWORD 'financial_password';
+CREATE DATABASE financial_agent OWNER financial_user;
+
+# Grant privileges
+GRANT ALL PRIVILEGES ON DATABASE financial_agent TO financial_user;
+
+# Connect to the new database
+\c financial_agent
+
+# Verify connection
+\dt
+```
+
+**Connection String:**
+```
+postgresql://financial_user:financial_password@localhost:5432/financial_agent
+```
+
+#### Option 3: Cloud PostgreSQL
+
+**AWS RDS:**
+1. Go to [AWS RDS Console](https://console.aws.amazon.com/rds/)
+2. Click "Create Database"
+3. Select PostgreSQL engine
+4. Configure settings and note the endpoint
+5. Add connection string to `.env`:
+   ```
+   DATABASE_URL=postgresql://username:password@endpoint:5432/financial_agent
+   ```
+
+**Azure Database for PostgreSQL:**
+1. Go to [Azure Portal](https://portal.azure.com/)
+2. Create new "Azure Database for PostgreSQL"
+3. Configure and get connection details
+4. Add to `.env`
+
+**Supabase (PostgreSQL as a Service):**
+1. Sign up at [supabase.com](https://supabase.com/)
+2. Create new project
+3. Copy connection string from project settings
+4. Add to `.env`:
+   ```
+   DATABASE_URL=postgresql://[user]:[password]@[host]:[port]/[database]
+   ```
+
+### Database Initialization
+
+After PostgreSQL is ready, initialize the application database:
+
+```bash
+# Navigate to project root
+cd financial_agent_fork
+
+# Run migrations using Alembic
+alembic upgrade head
+```
+
+**Expected Output:**
+```
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade -> xxxxx, Initial migration
+```
+
+### Verify Database Setup
+
+```bash
+# Connect to database
+psql -U financial_user -d financial_agent -h localhost
+
+# List all tables
+\dt
+
+# Expected tables:
+# - users
+# - chat_sessions
+# - chat_messages
+# - audit_logs
+# - document_uploads
+
+# Exit psql
+\q
+```
+
+---
+
+### Qdrant Vector Database Setup
+
+Qdrant stores vector embeddings for RAG (Retrieval Augmented Generation) features.
+
+#### Option 1: Qdrant Cloud (Recommended for Production)
+
+1. **Sign Up**: Go to [cloud.qdrant.io](https://cloud.qdrant.io/)
+2. **Create Cluster**:
+   - Click "Create Cluster"
+   - Select region (choose closest to your location)
+   - Name: `financial-agent` or similar
+   - Free tier available for testing
+
+3. **Get Credentials**:
+   - Copy the API Key and Cluster URL
+   - Add to `.env`:
+     ```
+     QDRANT_MODE=cloud
+     QDRANT_CLOUD_URL=https://your-cluster.qdrant.io
+     QDRANT_CLOUD_API_KEY=your-api-key
+     ```
+
+4. **Verify Connection**:
+   ```bash
+   python -c "from qdrant_client import QdrantClient; c = QdrantClient(url='YOUR_URL', api_key='YOUR_KEY'); print('✓ Qdrant connected')"
+   ```
+
+#### Option 2: Docker Container (Development)
+
+```bash
+# Run Qdrant container
+docker run --name qdrant \
+  -p 6333:6333 \
+  -p 6334:6334 \
+  -v qdrant_storage:/qdrant/storage \
+  -d qdrant/qdrant
+
+# Verify container
+docker ps
+
+# Check web interface
+# Visit http://localhost:6333/dashboard
+```
+
+**Add to `.env`:**
+```
+QDRANT_MODE=local
+QDRANT_URL=http://localhost:6333
+QDRANT_API_KEY=
+```
+
+#### Option 3: Local Installation (Development)
+
+```bash
+# Download and run Qdrant locally
+# Visit https://qdrant.tech/documentation/quick-start/ for platform-specific instructions
+
+# macOS:
+brew install qdrant
+
+# Linux:
+docker run -p 6333:6333 qdrant/qdrant
+```
+
+---
+
+## 🔧 Environment Configuration
+
+### Create .env File
+
+```bash
+# Copy the template
+cp .env.example .env
+```
+
+### Complete Configuration
+
+Edit `.env` with all required values:
+
+```dotenv
+# ==========================================
+# DATABASE CONFIGURATION
+# ==========================================
+DATABASE_URL=postgresql://financial_user:financial_password@localhost:5432/financial_agent
+JWT_SECRET_KEY=your-super-secret-key-change-this-in-production
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=your_secure_password_here
+
+# ==========================================
+# LLM PROVIDER CONFIGURATION
+# ==========================================
+LLM_PROVIDER=gemini          # Options: 'gemini' or 'ollama'
+GOOGLE_API_KEY=your_api_key  # Required if using Gemini
+LLM_MODEL=gemini-2.5-flash   # Google Gemini model
+
+# OR for Ollama:
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen3:8b
+
+# LLM Settings
+LLM_TEMPERATURE=0.3
+LLM_MAX_TOKENS=2048
+
+# ==========================================
+# QDRANT VECTOR DATABASE
+# ==========================================
+QDRANT_MODE=cloud              # 'cloud' or 'local'
+
+# Cloud Settings:
+QDRANT_CLOUD_URL=https://your-instance.qdrant.io
+QDRANT_CLOUD_API_KEY=your-qdrant-api-key
+
+# OR Local Settings:
+# QDRANT_URL=http://localhost:6333
+# QDRANT_API_KEY=
+
+# Timeout settings
+QDRANT_TIMEOUT_SECONDS=120
+QDRANT_RETRY_ATTEMPTS=3
+QDRANT_RETRY_DELAY_SECONDS=2.0
+
+# ==========================================
+# EMBEDDING CONFIGURATION
+# ==========================================
+EMBEDDING_MODEL_FINANCIAL=fin-e5-small
+EMBEDDING_MODEL_GENERAL=sentence-transformers/all-MiniLM-L6-v2
+CHUNK_SIZE_TOKENS=512
+CHUNK_OVERLAP_TOKENS=50
+
+# ==========================================
+# RAG CONFIGURATION
+# ==========================================
+ENABLE_RAG=True
+RAG_PRIORITY_MODE=personal-first
+RAG_SIMILARITY_THRESHOLD=0.1
+RAG_TOP_K_RESULTS=20
+RAG_MIN_RELEVANCE=0.3
+RAG_MAX_DOCUMENTS=5
+
+# ==========================================
+# FEATURE FLAGS
+# ==========================================
+DEBUG=False
+ENABLE_TOOLS=True
+ENABLE_SUMMARIZATION=True
+ENABLE_QUERY_REWRITING=True
+
+# ==========================================
+# API CONFIGURATION
+# ==========================================
+API_HOST=0.0.0.0
+API_PORT=8000
+CORS_ORIGINS=http://localhost:5173,http://localhost:3000,http://localhost:8000
+
+# ==========================================
+# RATE LIMITING
+# ==========================================
+RATE_LIMIT_REQUESTS=100
+RATE_LIMIT_PERIOD_MINUTES=60
+```
+
+### Validate Configuration
+
+```bash
+python -c "from src.core.config import settings; print('✓ Configuration loaded'); print(f'DB: {settings.DATABASE_URL}'); print(f'LLM: {settings.LLM_PROVIDER}')"
+```
+
+---
+
 ## ✨ Tính năng
 
 ### 📊 Thông tin doanh nghiệp
@@ -393,523 +871,1094 @@ Gửi file Excel dữ liệu tài chính:
 - Upload file .xlsx/.xls
 - Agent sẽ chuyển đổi thành Markdown
 - Phân tích dữ liệu tài chính
+```
 
 ---
 
-## 🔧 Cấu hình nâng cao
+## 🚀 Running the Application
 
-### Thay đổi LLM Provider
+### 1. Start Backend API Server
 
-Chỉnh sửa `.env`:
+```bash
+# Activate virtual environment
+.\venv\Scripts\activate  # Windows
+source venv/bin/activate  # macOS/Linux
+
+# Start the FastAPI server
+python main.py
+```
+
+**Expected Output:**
+```
+╔══════════════════════════════════════════════════════════════╗
+║              Financial Agent API                             ║
+║       Vietnamese Stock Market Investment Assistant           ║
+╚══════════════════════════════════════════════════════════════╝
+
+🚀 Starting server...
+📍 API Server: http://0.0.0.0:8000
+📚 API Documentation (Swagger UI): http://0.0.0.0:8000/docs
+...
+Press CTRL+C to quit
+```
+
+### 2. Test API Server
+
+In a new terminal:
+
+```bash
+# Test health check
+curl http://localhost:8000/health
+
+# Test chat endpoint
+curl -X POST "http://localhost:8000/api/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Thông tin về VNM"}'
+```
+
+### 3. Access Swagger UI
+
+Open browser and visit: **http://localhost:8000/docs**
+
+You can test all API endpoints interactively here.
+
+### 4. (Optional) Start Frontend
+
+```bash
+# In a new terminal
+cd frontend
+
+# Install dependencies if not already done
+npm install
+
+# Start development server
+npm run dev
+```
+
+Frontend will be available at: **http://localhost:5173**
+
+### 5. (Optional) Start Desktop App
+
+```bash
+# In a new terminal
+cd desktop_app
+
+# Setup (only first time)
+npm install
+
+# Start Electron app
+npm start
+```
+
+---
+
+## 🔧 Advanced Configuration
+
+---
+
+## 🔧 Advanced Configuration
+
+### Switching LLM Providers
+
+Edit `.env` to change which LLM is used:
 
 ```env
-# Gemini
+# Google Gemini (Cloud)
 LLM_PROVIDER=gemini
 LLM_MODEL=gemini-2.5-flash
-GOOGLE_API_KEY=your_key_here
+GOOGLE_API_KEY=your_api_key_here
 
-# Ollama
+# Ollama (Local)
 LLM_PROVIDER=ollama
 OLLAMA_MODEL=qwen2.5:3b
 OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-**Lưu ý**: Phải restart server sau khi thay đổi `.env`
+**Important**: Restart the server after changing `.env`
 
-### Ollama Troubleshooting
-
-**Lỗi: "Connection refused"**
+### Setting Up Ollama (Local LLM)
 
 ```bash
-# Kiểm tra Ollama đang chạy
+# Download and install from https://ollama.com/
+
+# Start Ollama server
+ollama serve
+
+# In another terminal, pull a model
+ollama pull qwen2.5:7b
+
+# Verify installation
+ollama list
+```
+
+### Troubleshooting Ollama
+
+**Error: "Connection refused"**
+
+```bash
+# Check if Ollama is running
 ollama list
 
-# Nếu không chạy, khởi động lại
+# If not running, start it
 ollama serve
 ```
 
-**Lỗi: "Out of memory"**
+**Error: "Out of memory"**
 
-- Thử model nhỏ hơn: `ollama pull qwen2.5:3b`
-- Hoặc chuyển sang Gemini
+- Use a smaller model: `ollama pull qwen2.5:3b`
+- Switch to Gemini (cloud-based)
 
-**Lỗi: "Model not found"**
+**Error: "Model not found"**
 
 ```bash
-# Kiểm tra model đã pull chưa
+# List available models
 ollama list
 
-# Pull model
-ollama pull qwen2.5:3b
+# Pull a new model
+ollama pull qwen2.5:7b
 ```
 
-### Tùy chỉnh System Prompt
+**Recommended Models for Financial Analysis:**
 
- Chỉnh sửa các file prompt:
+- `qwen2.5:7b` - Best balance of quality and speed
+- `llama2:13b` - High quality but slower
+- `qwen2.5:3b` - Fast but lower quality
 
-- `src/agent/prompts/system_prompt.txt` - Prompt chính của agent
-- `src/agent/prompts/financial_report_prompt.txt` - Prompt phân tích báo cáo tài chính
-- `src/agent/prompts/excel_analysis_prompt.txt` - Prompt phân tích Excel
+### Getting Google Gemini API Key
 
-Restart server để áp dụng thay đổi.
+1. Go to [Google AI Studio](https://aistudio.google.com/apikey)
+2. Sign in with your Google account
+3. Click "Create API Key"
+4. Copy the key and add to `.env`:
+   ```
+   GOOGLE_API_KEY=your_key_here
+   LLM_PROVIDER=gemini
+   ```
 
-### Cấu hình Tesseract OCR
+### Custom System Prompts
+
+Edit these files to customize agent behavior:
+
+- `src/agent/prompts/system_prompt.txt` - Main agent prompt
+- `src/agent/prompts/financial_report_prompt.txt` - Financial report analysis
+- `src/agent/prompts/excel_analysis_prompt.txt` - Excel data analysis
+
+Restart server to apply changes.
+
+### Fine-tuning LLM Parameters
 
 ```env
-# Optional: Chỉ cần nếu Tesseract ở vị trí custom
+# Temperature (0.0-1.0): Higher = more creative, Lower = more focused
+LLM_TEMPERATURE=0.3
+
+# Maximum length of response
+LLM_MAX_TOKENS=2048
+
+# RAG Threshold (0.0-1.0): How relevant documents must be
+RAG_SIMILARITY_THRESHOLD=0.1
+
+# Number of documents to retrieve
+RAG_TOP_K_RESULTS=20
+```
+
+### Installing Additional Tools
+
+#### Install Tesseract OCR (Optional)
+
+Only needed for processing scanned PDFs:
+
+**Windows:**
+
+```
+# Download from: https://github.com/UB-Mannheim/tesseract/wiki/Downloads
+# Run installer
+
+# Add to .env:
 TESSERACT_PATH=C:\Program Files\Tesseract-OCR\tesseract.exe
 ```
 
-### Cấu hình LLM Parameters
+**macOS:**
 
-```env
-# Nhiệt độ (0.0-1.0): Cao = sáng tạo, Thấp = chính xác
-LLM_TEMPERATURE=0.3
+```bash
+brew install tesseract
+```
 
-# Độ dài tối đa của response
-LLM_MAX_TOKENS=2048
+**Linux:**
+
+```bash
+sudo apt-get install tesseract-ocr
+```
+
+#### Using TA-Lib for Advanced Technical Analysis
+
+```bash
+# Already installed via requirements.txt
+# Verify installation
+python -c "import talib; print('✓ TA-Lib installed')"
 ```
 
 ---
 
-## 📡 API Documentation
+## 📡 API Endpoints
 
-### Endpoint: `POST /api/chat`
+### Health Check Endpoint
 
-**Request:**
+**GET** `/health`
 
+```bash
+curl http://localhost:8000/health
+```
+
+**Response:**
 ```json
 {
-  "question": "Thông tin về VNM"
+  "status": "healthy",
+  "timestamp": "2025-01-11T10:30:00Z"
+}
+```
+
+### Chat Endpoint
+
+**POST** `/api/chat`
+
+Ask the financial agent any question about Vietnamese stocks.
+
+```bash
+curl -X POST "http://localhost:8000/api/chat" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "What is the latest price of VNM stock?"
+  }'
+```
+
+**Request Body:**
+```json
+{
+  "question": "Your question here",
+  "use_rag": true,  // Optional: use RAG for document analysis
+  "session_id": "optional_session_id"
 }
 ```
 
 **Response:**
-
 ```json
 {
-  "answer": "VNM là Công ty Cổ phần Sữa Việt Nam (Vinamilk)...\n\n| Thông tin | Giá trị |\n|-----------|---------|..."
+  "answer": "VNM (Vinamilk) stock information...\n\n| Date | Close | Volume |\n...",
+  "sources": ["VnStock API", "Company data"],
+  "processing_time_seconds": 2.5
 }
 ```
 
-### Endpoint: `POST /api/upload/financial-report`
+### Upload Financial Report
 
-Phân tích báo cáo tài chính từ hình ảnh (PNG, JPG, PDF).
+**POST** `/api/upload/financial-report`
 
-**Request:**
-- `file`: Tập tin hình ảnh báo cáo (PNG, JPG, PDF)
+Analyze financial reports from images (PNG, JPG, PDF).
+
+```bash
+curl -X POST "http://localhost:8000/api/upload/financial-report" \
+  -F "file=@financial_report.jpg"
+```
 
 **Response:**
-
 ```json
 {
   "success": true,
-  "report_type": "BCDN",
-  "company": "Công ty ABC",
+  "report_type": "Balance Sheet",
+  "company": "ABC Corporation",
   "period": "Q3/2024",
   "extracted_text": "...",
-  "markdown_table": "| Chỉ tiêu | Giá trị |\n...",
-  "analysis": "Phân tích chi tiết từ Gemini..."
+  "markdown_table": "| Item | Value |\n...",
+  "analysis": "Financial analysis from AI..."
 }
 ```
 
-### Endpoint: `POST /api/upload/pdf`
+### Upload PDF Document
 
-Phân tích file PDF báo cáo tài chính.
+**POST** `/api/upload/pdf`
 
-**Request:**
-- `file`: File PDF
-- `question`: (Optional) Câu hỏi cụ thể về PDF
+Analyze PDF financial documents.
+
+```bash
+curl -X POST "http://localhost:8000/api/upload/pdf" \
+  -F "file=@report.pdf"
+```
 
 **Response:**
-
 ```json
 {
   "success": true,
-  "file_name": "financial_report.pdf",
+  "file_name": "report.pdf",
   "total_pages": 5,
   "extracted_text": "...",
-  "tables_markdown": "| Bảng 1 | ... |\n...",
-  "analysis": "Phân tích tài chính chi tiết",
+  "tables_markdown": "| Table | Data |\n...",
+  "analysis": "Detailed financial analysis...",
   "processing_method": "native"
 }
 ```
 
-### Endpoint: `POST /api/upload/excel`
+### Upload Excel File
 
-Phân tích file Excel dữ liệu tài chính.
+**POST** `/api/upload/excel`
 
-**Request:**
-- `file`: File Excel (.xlsx, .xls)
+Analyze Excel financial data files.
+
+```bash
+curl -X POST "http://localhost:8000/api/upload/excel" \
+  -F "file=@financial_data.xlsx"
+```
 
 **Response:**
-
 ```json
 {
   "success": true,
   "file_name": "financial_data.xlsx",
   "sheet_count": 3,
-  "markdown": "# Phân tích dữ liệu từ file: financial_data\n\n**Tóm tắt:** File chứa 3 bảng tính\n\n## Sheet 1: Revenue\n| Tháng | Doanh thu |\n...",
-  "message": "Phân tích file Excel thành công"
+  "markdown": "# Financial Data Analysis\n\n## Sheet 1: Revenue\n| Month | Amount |\n...",
+  "message": "Excel file analysis successful"
 }
 ```
 
-### Swagger UI
+### Interactive API Documentation
 
-Mở trình duyệt: **http://localhost:8000/docs**
+Visit **http://localhost:8000/docs** (Swagger UI) to:
+- View all available endpoints
+- Test endpoints with example data
+- See response schemas
+- Download API specification
 
-### Example với Python
+---
 
-```python
-import requests
+## 🐛 Troubleshooting Guide
 
-# Chat endpoint
-response = requests.post(
-    "http://localhost:8000/api/chat",
-    json={"question": "Giá VCB 3 tháng gần nhất"}
-)
-print(response.json()["answer"])
+### Installation Issues
 
-# Upload financial report
-with open("report.png", "rb") as f:
-    files = {"file": f}
-    response = requests.post(
-        "http://localhost:8000/api/upload/financial-report",
-        files=files
-    )
-    print(response.json())
-
-# Upload Excel file
-with open("data.xlsx", "rb") as f:
-    files = {"file": f}
-    response = requests.post(
-        "http://localhost:8000/api/upload/excel",
-        files=files
-    )
-    print(response.json())
-```
-
-### Example với cURL
+**Error: "Python version too old"**
 
 ```bash
-# Chat endpoint
-curl -X POST "http://localhost:8000/api/chat" \
-  -H "Content-Type: application/json" \
-  -d '{"question": "Tính SMA-20 cho HPG"}'
+# Check your Python version
+python --version
 
-# Upload financial report
-curl -X POST "http://localhost:8000/api/upload/financial-report" \
-  -F "file=@report.png"
+# Should be 3.9 or higher. If not, download from python.org
+```
 
-# Upload PDF
-curl -X POST "http://localhost:8000/api/upload/pdf" \
-  -F "file=@financial_report.pdf"
+**Error: "pip install failed"**
 
-# Upload Excel
-curl -X POST "http://localhost:8000/api/upload/excel" \
-  -F "file=@financial_data.xlsx"
+```bash
+# Clear pip cache
+pip cache purge
+
+# Upgrade pip
+python -m pip install --upgrade pip
+
+# Try installing again
+pip install -r requirements.txt
+```
+
+**Error: "ModuleNotFoundError: No module named 'xxx'"**
+
+```bash
+# Reinstall with force-reinstall
+pip install -r requirements.txt --force-reinstall
+
+# Or reinstall specific package
+pip install langchain --upgrade
+```
+
+### Database Connection Issues
+
+**Error: "Connection refused" for PostgreSQL**
+
+```bash
+# Check if PostgreSQL is running
+# Windows: Services app → PostgreSQL → Should show "Running"
+# macOS: brew services list | grep postgres
+# Linux: sudo systemctl status postgresql
+
+# If not running, start it:
+# Windows: Services app → PostgreSQL → Start
+# macOS: brew services start postgresql@15
+# Linux: sudo systemctl start postgresql
+```
+
+**Error: "database does not exist"**
+
+```bash
+# Recreate the database
+psql -U postgres
+CREATE DATABASE financial_agent;
+GRANT ALL PRIVILEGES ON DATABASE financial_agent TO financial_user;
+\q
+
+# Run migrations
+alembic upgrade head
+```
+
+**Error: "Database URL is empty"**
+
+```bash
+# Check .env file has DATABASE_URL
+cat .env | grep DATABASE_URL
+
+# Should see something like:
+# DATABASE_URL=postgresql://financial_user:financial_password@localhost:5432/financial_agent
+```
+
+### LLM Provider Issues
+
+**Error: "GOOGLE_API_KEY not configured"**
+
+```bash
+# 1. Get API key from: https://aistudio.google.com/apikey
+# 2. Add to .env:
+GOOGLE_API_KEY=your_actual_key_here
+LLM_PROVIDER=gemini
+
+# 3. Restart server
+```
+
+**Error: "Ollama connection failed"**
+
+```bash
+# Check if Ollama is running
+ollama list
+
+# Start Ollama if not running
+ollama serve
+
+# Update .env to point to correct URL
+OLLAMA_BASE_URL=http://localhost:11434
+LLM_PROVIDER=ollama
+```
+
+**Error: "Model not found"**
+
+```bash
+# List available models
+ollama list
+
+# Pull a model
+ollama pull qwen2.5:7b
+
+# Set model in .env
+OLLAMA_MODEL=qwen2.5:7b
+```
+
+### API Server Issues
+
+**Error: "Port 8000 already in use"**
+
+```bash
+# Use different port
+API_PORT=8001 python main.py
+
+# Or find process using port 8000 and kill it
+# Windows:
+netstat -ano | findstr :8000
+taskkill /PID <PID> /F
+
+# macOS/Linux:
+lsof -i :8000
+kill -9 <PID>
+```
+
+**Error: "CORS error" from frontend**
+
+```bash
+# Update .env with correct origins
+CORS_ORIGINS=http://localhost:5173,http://localhost:3000,http://localhost:8000
+
+# Restart server
+```
+
+**Error: "No module named 'src'"**
+
+```bash
+# Make sure running from project root directory
+cd financial_agent_fork
+
+# Verify directory structure
+ls -la src/  # Should show src/ folder exists
+
+# Run server from root
+python main.py
+```
+
+### Qdrant Vector Database Issues
+
+**Error: "Qdrant connection failed"**
+
+```bash
+# Check Qdrant is running
+curl http://localhost:6333/health
+
+# If not running, start with Docker
+docker run --name qdrant -p 6333:6333 qdrant/qdrant
+
+# Or for Qdrant Cloud, update .env
+QDRANT_MODE=cloud
+QDRANT_CLOUD_URL=https://your-instance.qdrant.io
+QDRANT_CLOUD_API_KEY=your-api-key
+```
+
+**Error: "Collection not found"**
+
+This is normal for first run. Collections are created automatically when first document is uploaded.
+
+**Error: "Timeout connecting to Qdrant"**
+
+```bash
+# Increase timeout in .env
+QDRANT_TIMEOUT_SECONDS=300
+QDRANT_RETRY_ATTEMPTS=5
+
+# Restart server
+```
+
+### File Upload Issues
+
+**Error: "File size too large"**
+
+- Default limit: 50MB per file
+- For larger files, split into multiple smaller files
+- Or adjust FastAPI settings
+
+**Error: "Unsupported file type"**
+
+- Financial Reports: PNG, JPG, PDF
+- Data Files: XLSX, XLS
+- PDF: PDF only
+
+### Document Processing Issues
+
+**Error: "OCR failed" or "Tesseract not found"**
+
+```bash
+# Option 1: Install Tesseract (see Installation Guide above)
+# Option 2: Use Google Gemini Vision API instead (recommended)
+# Set in .env:
+LLM_PROVIDER=gemini
+GOOGLE_API_KEY=your_key_here
+```
+
+**Error: "PDF extraction failed"**
+
+- Try with a different PDF file
+- Ensure PDF is not password-protected
+- Scanned PDFs may need OCR (slower)
+
+**Error: "Excel file cannot be read"**
+
+- Verify file is not corrupted
+- Save file in .xlsx format (not .xls)
+- Check file has proper Excel structure
+- Remove unusual blank rows/columns
+
+### Performance Issues
+
+**API is slow to respond**
+
+```bash
+# 1. Check if it's LLM latency
+# - Switching to faster model (qwen2.5:3b)
+# - Or use Gemini instead
+
+# 2. Check if it's database query
+# - Add database indexes
+# - Check database server is running properly
+
+# 3. Check RAM usage
+# - Monitor memory with: Task Manager (Windows), Activity Monitor (macOS), htop (Linux)
+# - If low on RAM, reduce model size
+
+# 4. Enable debug mode to see timings
+DEBUG=True
+```
+
+**High memory usage**
+
+```bash
+# Use smaller LLM model
+OLLAMA_MODEL=qwen2.5:3b  # Instead of qwen2.5:7b
+
+# Or switch to API-based (cloud) providers
+LLM_PROVIDER=gemini
+```
+
+### Getting Help
+
+**Check logs for detailed error messages:**
+
+```bash
+# Windows: Logs are printed in terminal
+# Look for error messages starting with [ERROR]
+
+# Enable verbose logging
+DEBUG=True
+```
+
+**Test individual components:**
+
+```bash
+# Test VnStock API
+python -c "from vnstock3 import Vnstock; v = Vnstock(); print(v.listing_companies())"
+
+# Test PostgreSQL
+python -c "from src.database.database import SessionLocal; db = SessionLocal(); print('✓ Database connected')"
+
+# Test Qdrant
+python -c "from qdrant_client import QdrantClient; c = QdrantClient(':memory:'); print('✓ Qdrant OK')"
+
+# Test LLM
+python -c "from src.llm.llm_factory import LLMFactory; llm = LLMFactory.get_llm(); print(llm.invoke('Hello'))"
 ```
 
 ---
 
-## 🛠️ Chi tiết 8 Tools
+## 🛠️ Available Tools Reference
 
-### 1. get_company_info
+The financial agent has access to these tools for stock market analysis:
 
-- **Mô tả**: Thông tin tổng quan về công ty
-- **Input**: `ticker` (VNM, VCB, HPG...)
-- **Output**: Tên, ngành, vốn điều lệ, lịch sử công ty
+### Stock Information Tools
 
-### 2. get_shareholders
+#### 1. get_company_info
+Get company overview and profile information
+- **Input**: `ticker` (e.g., VNM, VCB, HPG)
+- **Output**: Company name, industry, charter capital, history
 
-- **Mô tả**: Danh sách cổ đông lớn
+#### 2. get_shareholders
+Retrieve major shareholders information
 - **Input**: `ticker`
-- **Output**: Top 10 cổ đông, tỷ lệ sở hữu, số lượng CP
+- **Output**: Top 10 shareholders with ownership percentages
 
-### 3. get_officers
-
-- **Mô tả**: Ban lãnh đạo công ty
+#### 3. get_officers
+Get company leadership and management team
 - **Input**: `ticker`
-- **Output**: Danh sách lãnh đạo, chức vụ, tỷ lệ sở hữu
+- **Output**: Executives, positions, shareholding percentage
 
-### 4. get_subsidiaries
-
-- **Mô tả**: Công ty con và công ty liên kết
+#### 4. get_subsidiaries
+Find subsidiary and affiliated companies
 - **Input**: `ticker`
-- **Output**: Danh sách công ty con, tỷ lệ nắm giữ
+- **Output**: List of subsidiaries with ownership percentage
 
-### 5. get_company_events
-
-- **Mô tả**: Sự kiện của công ty
+#### 5. get_company_events
+Get company events and announcements
 - **Input**: `ticker`
-- **Output**: 20 sự kiện gần nhất (cổ tức, ĐHCĐ, tăng vốn...)
+- **Output**: Recent corporate events (dividends, AGM, capital increases)
 
-### 6. get_historical_data
+### Market Data Tools
 
-- **Mô tả**: Dữ liệu giá lịch sử (OHLCV)
-- **Input**: `ticker`, `start_date`, `end_date` hoặc `period`
-- **Output**: Bảng OHLCV chi tiết + thống kê
+#### 6. get_historical_data
+Retrieve historical price data (OHLCV)
+- **Input**: `ticker`, `start_date`, `end_date` or `period` (3M, 6M, 1Y)
+- **Output**: Detailed OHLCV table with statistics
+- **Example**: `get_historical_data("VNM", period="3M")`
 
-### 7. calculate_sma
+### Technical Analysis Tools
 
-- **Mô tả**: Simple Moving Average
-- **Input**: `ticker`, `window` (mặc định 20)
-- **Output**: Bảng SMA theo ngày + phân tích xu hướng
+#### 7. calculate_sma
+Calculate Simple Moving Average
+- **Input**: `ticker`, `window` (default: 20)
+- **Output**: SMA values with trend analysis
+- **Example**: `calculate_sma("VNM", window=20)`
 
-### 8. calculate_rsi
+#### 8. calculate_rsi
+Calculate Relative Strength Index
+- **Input**: `ticker`, `window` (default: 14)
+- **Output**: RSI values with overbought/oversold signals
+- **Example**: `calculate_rsi("HPG", window=14)`
 
-- **Mô tả**: Relative Strength Index
-- **Input**: `ticker`, `window` (mặc định 14)
-- **Output**: Bảng RSI theo ngày + đánh giá quá mua/quá bán
+### How to Use Tools in Chat
 
----
+Simply ask the agent questions, and it will automatically use the appropriate tools:
 
-## 📊 Response Format
+```
+Q: "What is the latest price of VNM?"
+→ Uses get_historical_data
 
-Tools trả về JSON chuẩn:
+Q: "Who are the major shareholders of VCB?"
+→ Uses get_shareholders
 
-```json
-{
-  "success": true,
-  "ticker": "VNM",
-  "detailed_data": [
-    { "date": "2024-11-01", "close": 85.5, "sma_20": 84.2 },
-    { "date": "2024-11-04", "close": 86.0, "sma_20": 84.5 }
-  ],
-  "analysis": {
-    "trend": "TĂNG",
-    "signal": "positive"
-  },
-  "message": "Đã tính SMA-20 cho VNM thành công"
-}
+Q: "Calculate SMA-20 for HPG"
+→ Uses calculate_sma with window=20
+
+Q: "Is FPT stock overbought right now?"
+→ Uses calculate_rsi to check signal
 ```
 
-Agent sẽ chuyển đổi JSON này thành bảng Markdown đẹp mắt.
+---
+
+## 🏗️ Architecture
+
+### Tech Stack
+
+- **Backend**: FastAPI (REST API)
+- **Agent Framework**: LangChain + LangGraph (ReAct Pattern)
+- **LLM Providers**:
+  - ☁️ Google Gemini (Cloud) - AI analysis & OCR
+  - 🖥️ Ollama (Local) - for chat & analysis
+- **Data Source**: VnStock3 API (Free)
+- **Vector Database**: Qdrant (RAG)
+- **Relational Database**: PostgreSQL
+- **Technical Analysis**: TA-Lib
+- **Document Processing**:
+  - pytesseract + OpenCV (OCR for scanned documents)
+  - pdfplumber (PDF text extraction)
+  - pdf2image (PDF to image conversion)
+- **Excel Processing**: openpyxl + pandas
+- **Frontend**: React + Vite + TailwindCSS
+- **Desktop App**: Electron
+
+### Project Structure
+
+```
+financial_agent/
+├── src/
+│   ├── agent/              # LangGraph Agent
+│   │   ├── financial_agent.py
+│   │   ├── state.py
+│   │   └── prompts/
+│   │       ├── system_prompt.txt
+│   │       ├── financial_report_prompt.txt
+│   │       └── excel_analysis_prompt.txt
+│   ├── tools/              # 8+ Analysis Tools
+│   │   ├── vnstock_tools.py         # Company & stock data
+│   │   ├── technical_tools.py       # SMA, RSI indicators
+│   │   ├── financial_report_tools.py # OCR + Gemini analysis
+│   │   ├── pdf_tools.py             # PDF processing
+│   │   └── excel_tools.py           # Excel analysis
+│   ├── llm/                # LLM Factory
+│   │   ├── llm_factory.py
+│   │   └── llm_config.py
+│   ├── database/           # Database Models
+│   │   ├── database.py
+│   │   └── models.py
+│   ├── api/                # REST API Endpoints
+│   │   ├── app.py
+│   │   ├── routes/
+│   │   └── middleware/
+│   ├── services/           # Business Logic
+│   │   ├── chat_service.py
+│   │   ├── document_service.py
+│   │   └── admin_service.py
+│   ├── core/               # Configuration
+│   │   ├── config.py
+│   │   └── constants.py
+│   └── utils/              # Utilities
+│       ├── validators.py
+│       └── helpers.py
+├── migrations/             # Alembic DB migrations
+├── frontend/               # React Frontend
+│   ├── src/
+│   │   ├── components/
+│   │   ├── pages/
+│   │   └── services/
+│   └── package.json
+├── desktop_app/            # Electron Desktop App
+│   ├── main.js
+│   ├── preload.js
+│   └── package.json
+├── requirements.txt        # Python dependencies
+├── alembic.ini            # Database migration config
+├── main.py                # Application entry point
+└── README.md              # This file
+```
+
+### Data Flow Diagram
+
+```
+User Input
+    ↓
+FastAPI Endpoint
+    ↓
+LangGraph Agent
+    ├→ Tool Router
+    │   ├→ VnStock Tools (Stock data)
+    │   ├→ Technical Tools (SMA, RSI)
+    │   ├→ Financial Report Tools (OCR + AI)
+    │   ├→ PDF Tools (Document parsing)
+    │   └→ Excel Tools (Data analysis)
+    ├→ LLM Provider
+    │   ├→ Google Gemini (Cloud)
+    │   └→ Ollama (Local)
+    └→ Qdrant Vector DB (RAG retrieval)
+    ↓
+Markdown Response
+    ↓
+Frontend Display
+```
+
+### Database Schema
+
+```sql
+-- Users table
+CREATE TABLE users (
+  id UUID PRIMARY KEY,
+  username VARCHAR UNIQUE,
+  email VARCHAR UNIQUE,
+  hashed_password VARCHAR,
+  is_admin BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMP
+);
+
+-- Chat sessions
+CREATE TABLE chat_sessions (
+  id UUID PRIMARY KEY,
+  user_id UUID FOREIGN KEY,
+  title VARCHAR,
+  use_rag BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP
+);
+
+-- Chat messages
+CREATE TABLE chat_messages (
+  id UUID PRIMARY KEY,
+  session_id UUID FOREIGN KEY,
+  role VARCHAR,
+  content TEXT,
+  created_at TIMESTAMP
+);
+
+-- Document uploads
+CREATE TABLE document_uploads (
+  id UUID PRIMARY KEY,
+  user_id UUID FOREIGN KEY,
+  file_name VARCHAR,
+  file_type VARCHAR,
+  file_size INTEGER,
+  created_at TIMESTAMP
+);
+
+-- Audit logs
+CREATE TABLE audit_logs (
+  id UUID PRIMARY KEY,
+  user_id UUID FOREIGN KEY,
+  action VARCHAR,
+  timestamp TIMESTAMP
+);
+```
+
+### Integration Points
+
+**PostgreSQL ↔ FastAPI**
+- SQLAlchemy ORM for data modeling
+- Alembic for schema migrations
+- Connection pooling for performance
+
+**VnStock API ↔ Tools**
+- Real-time stock prices
+- Historical OHLCV data
+- Company fundamentals
+- Shareholder information
+
+**LLM Providers ↔ Agent**
+- Gemini: For analysis and OCR
+- Ollama: For local chat
+- Tool calling and function execution
+
+**Qdrant ↔ RAG System**
+- Vector embeddings storage
+- Semantic document retrieval
+- Collection management
 
 ---
 
-## 🎓 Học thêm
+## 📚 Learning Resources
 
-### VnStock API
+### Official Documentation
 
-- Documentation: https://vnstocks.com/docs/vnstock
-- GitHub: https://github.com/thinh-vu/vnstock
-
-### LangChain & LangGraph
-
-- LangChain Docs: https://python.langchain.com/
-- LangGraph Tutorial: https://langchain-ai.github.io/langgraph/
+- **VnStock**: https://vnstocks.com/docs/vnstock
+- **LangChain**: https://python.langchain.com/
+- **LangGraph**: https://langchain-ai.github.io/langgraph/
+- **FastAPI**: https://fastapi.tiangolo.com/
+- **PostgreSQL**: https://www.postgresql.org/docs/
+- **Qdrant**: https://qdrant.tech/documentation/
 
 ### Technical Analysis
 
-- TA-Lib: https://ta-lib.org/
-- Investopedia: https://www.investopedia.com/
+- **TA-Lib Documentation**: https://ta-lib.org/
+- **Investopedia**: https://www.investopedia.com/
+- **Moving Averages**: https://investopedia.com/terms/m/movingaverage.asp
+- **RSI Indicator**: https://investopedia.com/terms/r/rsi.asp
 
-### Ollama
+### Local LLM
 
-- Website: https://ollama.com/
-- Model Library: https://ollama.com/library
-- GitHub: https://github.com/ollama/ollama
+- **Ollama**: https://ollama.com/
+- **Ollama Models**: https://ollama.com/library
+- **Ollama GitHub**: https://github.com/ollama/ollama
+
+### AI/ML Frameworks
+
+- **Google Gemini**: https://ai.google.dev/
+- **LangChain**: https://www.langchain.com/
+- **Hugging Face**: https://huggingface.co/
 
 ---
 
-## 🐛 Troubleshooting
+## 🚀 Deployment Guide
 
-### Backend không chạy
+### Deploy Backend to Railway
 
-```bash
-# Kiểm tra Python version (cần >= 3.9)
-python --version
+1. Push code to GitHub
+2. Connect GitHub repository to Railway
+3. Set environment variables in Railway dashboard
+4. Railway automatically detects Python and deploys
 
-# Kiểm tra dependencies
-pip list | grep langchain
+### Deploy Frontend to Vercel
 
-# Reinstall dependencies
-pip install -r requirements.txt --force-reinstall
+1. Push frontend code to GitHub
+2. Connect GitHub to Vercel
+3. Configure build settings
+4. Vercel auto-deploys on push
+
+### Docker Deployment
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+CMD ["python", "main.py"]
 ```
 
-### Frontend không chạy
-
+Build and run:
 ```bash
-cd frontend
-rm -rf node_modules package-lock.json
-npm install
-npm run dev
-```
-
-### API trả lỗi
-
-```bash
-# Kiểm tra logs
-# Server sẽ in ra lỗi chi tiết trong terminal
-
-# Test trực tiếp tools
-python -c "from src.tools.vnstock_tools import get_company_info; print(get_company_info('VNM'))"
-```
-
-### Ollama lỗi
-
-```bash
-# Kiểm tra service
-ollama list
-
-# Restart service
-# Windows: Tìm Ollama trong Task Manager → Restart
-# Linux/Mac:
-sudo systemctl restart ollama
-
-# Test model
-ollama run qwen2.5:3b "Hello"
-```
-
-### Lỗi OCR / Phân tích báo cáo tài chính
-
-**Lỗi: "Tesseract not found"**
-
-```bash
-# Cài đặt Tesseract (xem phần setup ở trên)
-# Hoặc dùng Gemini Vision API (khuyến nghị)
-```
-
-**Lỗi: "GOOGLE_API_KEY không được cấu hình"**
-
-```bash
-# Đảm bảo .env có:
-GOOGLE_API_KEY=your_key_here
-LLM_PROVIDER=gemini  # hoặc "ollama"
-```
-
-**Kết quả OCR kém**
-
-- Thử upload hình ảnh chất lượng cao hơn
-- Hình ảnh nên có độ sáng tốt, không bị xoay
-- Dùng Gemini Vision thay vì Tesseract
-- Kiểm tra lại `TESSERACT_PATH` nếu dùng Tesseract custom
-
-### Lỗi Phân tích PDF
-
-**Lỗi: "Failed to extract text"**
-
-- Kiểm tra file PDF có hỏng không
-- Thử PDF khác để test
-- PDF scanned sẽ dùng OCR fallback (chậm hơn)
-
-**Lỗi: "Gemini analysis failed"**
-
-- Kiểm tra API key có hợp lệ không
-- Giới hạn request: kiểm tra quota Gemini API
-- Thử lại sau vài phút
-
-### Lỗi Phân tích Excel
-
-**Lỗi: "Cannot read file"**
-
-- Đảm bảo file Excel không bị corrupt
-- Thử lưu file dưới định dạng .xlsx
-- Kiểm tra quyền truy cập file
-
-**Dữ liệu hiển thị sai**
-
-- Kiểm tra format Excel (không có dòng/cột trống kỳ lạ)
-- Tăng `max_rows_per_sheet` nếu dữ liệu bị cắt
-- Cột số phải có format số, không phải text
-
-### Chat API không hoạt động
-
-**Lỗi: "Agent initialization failed"**
-
-```bash
-# Kiểm tra tools
-python -c "from src.tools import get_all_tools; print(len(get_all_tools()))"
-
-# Kiểm tra LLM provider
-python -c "from src.llm import LLMFactory; print(LLMFactory.get_llm())"
-```
-
-**Chat response chậm**
-
-- Model LLM yếu: nâng cấp model hoặc dùng Gemini
-- Máy tính không đủ RAM: giảm model size hoặc dùng cloud
-- Network chậm: kiểm tra kết nối internet
-
-### Upload file API
-
-**Lỗi: "File size too large"**
-
-- Giới hạn file mặc định: 50MB
-- Chia nhỏ file lớn thành nhiều file nhỏ
-- Kiểm tra cấu hình FastAPI
-
-**Lỗi: "Unsupported file type"**
-
-- Báo cáo tài chính: PNG, JPG, PDF
-- Excel: .xlsx, .xls
-- PDF: .pdf
-
-### Logs & Debugging
-
-```bash
-# Xem logs chi tiết (Linux/Mac)
-tail -f terminal_output.log
-
-# Xem logs real-time từ server
-# Mở terminal nơi chạy FastAPI, sẽ thấy logs đầy đủ
-
-# Debug mode
-# Thêm vào .env:
-DEBUG=True
-LOG_LEVEL=DEBUG
+docker build -t financial-agent .
+docker run -p 8000:8000 --env-file .env financial-agent
 ```
 
 ---
 
-## 🎯 Roadmap
+## 🔄 Workflow Examples
 
-- [ ] Thêm tools: Financial Ratios (P/E, ROE, ROA...)
-- [ ] Thêm tools: News scraping
-- [ ] Thêm charts visualization
-- [ ] Deploy lên cloud (Vercel + Railway)
-- [ ] Mobile app (React Native)
+### Example 1: Research a Stock
+
+```
+User: "Tell me everything about VNM stock"
+
+Agent:
+1. Uses get_company_info("VNM")
+2. Uses get_shareholders("VNM")
+3. Uses get_company_events("VNM")
+4. Uses get_historical_data("VNM", period="6M")
+5. Uses calculate_sma("VNM", window=20)
+6. Uses calculate_rsi("VNM")
+7. LLM synthesizes all data
+8. Returns comprehensive analysis with tables
+```
+
+### Example 2: Financial Report Analysis
+
+```
+User: Upload financial report image
+
+Agent:
+1. OCR image → Extract text
+2. Classify report type (Balance Sheet, Income Statement, etc.)
+3. Extract financial tables → Markdown
+4. Use Gemini to analyze data
+5. Return formatted analysis with insights
+```
+
+### Example 3: Portfolio Analysis
+
+```
+User: "I own VNM, VCB, and HPG. How are they doing?"
+
+Agent:
+1. Gets latest data for each stock
+2. Calculates technical indicators
+3. Analyzes trends and momentum
+4. Compares to market benchmarks
+5. Provides investment insights
+```
+
+---
+
+## 🌟 Features Roadmap
+
 - [ ] Real-time price updates (WebSocket)
+- [ ] Financial ratio calculations (P/E, ROE, ROA)
+- [ ] News scraping and sentiment analysis
+- [ ] Portfolio tracking and alerts
+- [ ] Mobile app (React Native)
+- [ ] Advanced charting and visualization
+- [ ] Machine learning price predictions
+- [ ] Multi-language support
 
 ---
 
 ## 🤝 Contributing
 
-Contributions are welcome!
+Contributions are welcome! Please follow these steps:
 
-1. Fork the project
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
+
+### Development Setup
+
+```bash
+# Create virtual environment
+python -m venv venv_dev
+source venv_dev/bin/activate
+
+# Install dev dependencies
+pip install -r requirements.txt
+pip install pytest pytest-asyncio black flake8
+
+# Run tests
+pytest
+
+# Format code
+black src/
+
+# Lint code
+flake8 src/
+```
 
 ---
 
 ## 📄 License
 
-MIT License - see LICENSE file for details
+MIT License - See [LICENSE](LICENSE) file for details
 
 ---
 
-## 👨‍💻 Author
+## 👨‍💻 Author & Support
 
-**Financial Agent** - AI Stock Market Assistant for Vietnam
+**Financial Agent** - AI Stock Market Assistant for Vietnam  
+Built with ❤️ using modern AI and financial technologies
 
-Built with ❤️ using LangGraph, VnStock, and modern AI technologies
+**Maintained by**: [Your Team/Name]  
+**Project Status**: Active Development  
+**Last Updated**: January 2025
 
-**Project**: AI Intern 2025  
-**Contact**: [Your contact info]
+### Quick Links
 
----
+- 📧 **Email**: [contact@example.com]
+- 💬 **Discussions**: GitHub Discussions
+- 🐛 **Issues**: GitHub Issues
+- 📖 **Wiki**: Project Wiki
 
-## 🌟 Acknowledgments
+### Acknowledgments
 
+Special thanks to:
 - VnStock team for the amazing free API
 - LangChain team for the powerful framework
 - Ollama team for local LLM support
 - Google for Gemini API
+- Open-source community
 
 ---
 
 **Happy Trading! 📈🚀**
+
+If you find this project helpful, please ⭐ star it on GitHub!
