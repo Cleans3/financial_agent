@@ -1,8 +1,22 @@
 import { Menu, TrendingUp, LogOut, User, ChevronDown, Settings } from "lucide-react";
-import { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback, memo } from "react";
 
-const Header = ({ onMenuClick, user, onLogout, onAdminClick }) => {
+const Header = memo(({ onMenuClick, user, onLogout, onAdminClick }) => {
   const [showUserMenu, setShowUserMenu] = useState(false);
+
+  const handleToggleMenu = useCallback(() => {
+    setShowUserMenu(prev => !prev);
+  }, []);
+
+  const handleLogoutClick = useCallback(() => {
+    setShowUserMenu(false);
+    onLogout();
+  }, [onLogout]);
+
+  const handleAdminClick = useCallback(() => {
+    onAdminClick && onAdminClick();
+    setShowUserMenu(false);
+  }, [onAdminClick]);
 
   useEffect(() => {
     if (user) {
@@ -36,17 +50,17 @@ const Header = ({ onMenuClick, user, onLogout, onAdminClick }) => {
         </div>
 
         <div className="flex items-center gap-4">
-          <div className="hidden sm:flex items-center gap-2 bg-emerald-500/10 text-emerald-400 px-3 py-1.5 rounded-full text-sm">
-            <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>
-            <span>Online</span>
-          </div>
-
-          {/* User Menu */}
+          {/* User Menu - Fixed position */}
           {user && (
-            <div className="relative">
+            <div className="fixed top-3 right-4 z-50 flex items-center gap-4">
+              {/* Online Indicator */}
+              <div className="hidden sm:flex items-center gap-2 bg-emerald-500/10 text-emerald-400 px-3 py-1.5 rounded-full text-sm">
+                <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>
+                <span>Online</span>
+              </div>
               <button
-                onClick={() => setShowUserMenu(!showUserMenu)}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors"
+                onClick={handleToggleMenu}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors backdrop-blur-sm border border-slate-700/50"
               >
                 <div className="w-8 h-8 bg-sky-600 rounded-full flex items-center justify-center text-white text-sm font-semibold">
                   {user.username ? user.username.charAt(0).toUpperCase() : 'U'}
@@ -59,17 +73,14 @@ const Header = ({ onMenuClick, user, onLogout, onAdminClick }) => {
 
               {/* Dropdown Menu */}
               {showUserMenu && (
-                <div className="absolute right-0 mt-2 w-48 bg-slate-800 border border-slate-700 rounded-lg shadow-lg z-50">
+                <div className="absolute right-0 top-full mt-2 w-48 bg-slate-800 border border-slate-700 rounded-lg shadow-lg z-[9999]">
                   <div className="px-4 py-3 border-b border-slate-700">
                     <p className="text-sm font-medium text-white">{user.username}</p>
                     <p className="text-xs text-slate-400">{user.email}</p>
                   </div>
                   {user.is_admin && (
                     <button
-                      onClick={() => {
-                        onAdminClick && onAdminClick();
-                        setShowUserMenu(false);
-                      }}
+                      onClick={handleAdminClick}
                       className="w-full flex items-center gap-2 px-4 py-2 text-sm text-sky-400 hover:bg-sky-500/10 transition-colors border-b border-slate-700"
                     >
                       <Settings className="w-4 h-4" />
@@ -77,10 +88,7 @@ const Header = ({ onMenuClick, user, onLogout, onAdminClick }) => {
                     </button>
                   )}
                   <button
-                    onClick={() => {
-                      onLogout();
-                      setShowUserMenu(false);
-                    }}
+                    onClick={handleLogoutClick}
                     className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-400 hover:bg-red-500/10 transition-colors"
                   >
                     <LogOut className="w-4 h-4" />
@@ -94,6 +102,7 @@ const Header = ({ onMenuClick, user, onLogout, onAdminClick }) => {
       </div>
     </header>
   );
-};
+});
 
+Header.displayName = "Header";
 export default Header;

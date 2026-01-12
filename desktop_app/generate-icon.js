@@ -1,0 +1,46 @@
+const fs = require('fs');
+const path = require('path');
+
+// Create a simple SVG icon
+const svgIcon = `<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="256" height="256" fill="#1e293b" rx="32"/>
+  
+  <!-- Gradient circle -->
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#06b6d4;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <circle cx="128" cy="128" r="100" fill="url(#grad)"/>
+  
+  <!-- Financial chart lines -->
+  <path d="M 80 160 L 100 140 L 120 150 L 140 120 L 160 130 L 180 90" 
+        stroke="white" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  
+  <!-- Trending up arrow -->
+  <g transform="translate(160, 80)">
+    <path d="M 0 30 L 0 0 L 30 0" 
+          stroke="white" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>`;
+
+const outputPath = path.join(__dirname, 'assets', 'icon.svg');
+fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+fs.writeFileSync(outputPath, svgIcon);
+console.log('SVG icon created at:', outputPath);
+
+// Try to create PNG if sharp is available
+try {
+  const sharp = require('sharp');
+  const pngPath = path.join(__dirname, 'assets', 'icon.png');
+  sharp(Buffer.from(svgIcon))
+    .png()
+    .toFile(pngPath)
+    .then(() => console.log('PNG icon created at:', pngPath))
+    .catch(err => console.log('PNG creation skipped (sharp not available):', err.message));
+} catch (e) {
+  console.log('Sharp not available - SVG created only');
+}

@@ -1,8 +1,10 @@
 import { ChevronDown, Lightbulb } from "lucide-react";
-import { useState } from "react";
+import React, { useState, memo } from "react";
 
-const RightSidebar = () => {
+const RightSidebar = memo(({ isOpen = true, onToggle }) => {
   const [examplesExpanded, setExamplesExpanded] = useState(true);
+
+  if (!isOpen) return null;
 
   const examples = [
     { text: "Thông tin về công ty VNM", category: "Thông tin công ty" },
@@ -26,12 +28,23 @@ const RightSidebar = () => {
   };
 
   return (
-    <aside className="hidden lg:flex flex-col w-80 bg-gradient-to-b from-slate-800 to-slate-900 backdrop-blur-sm border-l border-slate-700">
+    <aside className="hidden 2xl:flex flex-col w-80 bg-gradient-to-b from-slate-800 to-slate-900 backdrop-blur-sm border-l border-slate-700 flex-shrink-0">
       {/* Header */}
       <div className="px-4 py-4 border-b border-slate-700">
-        <div className="flex items-center gap-2">
-          <Lightbulb className="w-5 h-5 text-amber-400" />
-          <h2 className="text-lg font-semibold text-white">Gợi ý</h2>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Lightbulb className="w-5 h-5 text-amber-400" />
+            <h2 className="text-lg font-semibold text-white">Gợi ý</h2>
+          </div>
+          {onToggle && (
+            <button
+              onClick={onToggle}
+              className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
+              title="Collapse sidebar"
+            >
+              <ChevronDown className="w-5 h-5 text-slate-400 rotate-90" />
+            </button>
+          )}
         </div>
       </div>
 
@@ -67,6 +80,7 @@ const RightSidebar = () => {
       </div>
     </aside>
   );
-};
+});
 
+RightSidebar.displayName = "RightSidebar";
 export default RightSidebar;

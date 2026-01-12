@@ -9,14 +9,14 @@ import {
   ChevronDown,
   ChevronUp,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import remarkGfm from "remark-gfm";
 import ThinkingSteps from "./ThinkingSteps";
 
-const MessageBubble = ({ message }) => {
+const MessageBubble = memo(({ message }) => {
   const [copied, setCopied] = useState(false);
   const [showThinkingSteps, setShowThinkingSteps] = useState(true); // Always show thinking steps expanded by default
   const isUser = message.role === "user";
@@ -221,7 +221,9 @@ const MessageBubble = ({ message }) => {
       </div>
     </div>
   );
-};
+});
+
+MessageBubble.displayName = "MessageBubble";
 
 // Component to display JSON data in a beautiful way
 const JSONDisplay = ({ data }) => {
@@ -263,4 +265,5 @@ const JSONDisplay = ({ data }) => {
   );
 };
 
-export default MessageBubble;
+MessageBubble.displayName = "MessageBubble";
+export default memo(MessageBubble);

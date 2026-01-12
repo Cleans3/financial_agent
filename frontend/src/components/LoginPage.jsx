@@ -276,14 +276,15 @@ const LoginPage = ({ onLoginSuccess }) => {
               {/* Email Field */}
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Email
+                  Email <span className="text-red-400">*</span>
                 </label>
                 <input
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="Enter your email (optional)"
+                  placeholder="Enter your email"
                   className={STYLES.input}
+                  required
                   disabled={loading}
                 />
               </div>

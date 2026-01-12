@@ -1,9 +1,9 @@
-import { X, Plus, Trash2, FileText, ChevronDown, MessageCircle } from "lucide-react";
-import { useState, useEffect } from "react";
+import { X, Plus, Trash2, FileText, ChevronDown, MessageCircle, ChevronLeft } from "lucide-react";
+import { useState, useEffect, memo } from "react";
 import { conversationService } from "../services/conversationService";
 import { COLORS, STYLES } from "../theme/colors";
 
-const Sidebar = ({ isOpen, onClose, user, onNewChat, onSelectConversation, onConversationDeleted, currentConversationId, refreshTrigger, isAgentThinking }) => {
+const Sidebar = memo(({ isOpen, onClose, onCollapseClick, user, onNewChat, onSelectConversation, onConversationDeleted, currentConversationId, refreshTrigger, isAgentThinking }) => {
   const [conversations, setConversations] = useState([]);
   const [recentExpanded, setRecentExpanded] = useState(true);
 
@@ -100,13 +100,24 @@ const Sidebar = ({ isOpen, onClose, user, onNewChat, onSelectConversation, onCon
         `}
       >
         {/* Close Button for Mobile */}
-        <div className="lg:hidden p-4 flex justify-end">
-          <button
-            onClick={onClose}
-            className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
-          >
-            <X className="w-5 h-5 text-slate-400" />
-          </button>
+        <div className="p-4 flex justify-between items-center">
+          <h2 className="text-lg font-semibold text-white">Conversations</h2>
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              className="lg:hidden p-2 hover:bg-slate-700 rounded-lg transition-colors"
+              title="Close sidebar"
+            >
+              <X className="w-5 h-5 text-slate-400" />
+            </button>
+            <button
+              onClick={onCollapseClick}
+              className="hidden lg:block p-2 hover:bg-slate-700 rounded-lg transition-colors"
+              title="Collapse sidebar"
+            >
+              <ChevronLeft className="w-5 h-5 text-slate-400" />
+            </button>
+          </div>
         </div>
 
         {/* New Chat Button */}
@@ -209,6 +220,7 @@ const Sidebar = ({ isOpen, onClose, user, onNewChat, onSelectConversation, onCon
       </aside>
     </>
   );
-};
+});
 
+Sidebar.displayName = "Sidebar";
 export default Sidebar;

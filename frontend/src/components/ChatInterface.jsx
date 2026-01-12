@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, memo, useCallback, useMemo } from "react";
 import { Send, Loader2, User, Bot, Plus, X, File, Image, FileText, FileSpreadsheet, FileArchive, BookOpen } from "lucide-react";
 import axios from "axios";
 import MessageBubble from "./MessageBubble";
@@ -28,7 +28,7 @@ const NODE_DESCRIPTIONS = {
   'GENERATE': 'Generating response'
 };
 
-const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh, onAgentThinkingChange }) => {
+const ChatInterface = memo(({ conversationId, onConversationChange, onSidebarRefresh, onAgentThinkingChange }) => {
   const [messages, setMessages] = useState([
     {
       role: "assistant",
@@ -741,6 +741,7 @@ const ChatInterface = ({ conversationId, onConversationChange, onSidebarRefresh,
       </div>
     </div>
   );
-};
+});
 
-export default ChatInterface;
+ChatInterface.displayName = "ChatInterface";
+export default memo(ChatInterface);

@@ -10,6 +10,7 @@ import { conversationService } from "./services/conversationService";
 
 function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [user, setUser] = useState(null);
   const [currentConversationId, setCurrentConversationId] = useState(null);
@@ -102,6 +103,7 @@ function App() {
       <Sidebar 
         isOpen={sidebarOpen} 
         onClose={() => setSidebarOpen(false)}
+        onCollapseClick={() => setSidebarOpen(false)}
         user={user}
         onNewChat={() => setCurrentConversationId(null)}
         onSelectConversation={handleConversationChange}
@@ -128,7 +130,7 @@ function App() {
       </div>
 
       {/* Right Sidebar - Example Questions */}
-      <RightSidebar />
+      <RightSidebar isOpen={rightSidebarOpen} onToggle={() => setRightSidebarOpen(!rightSidebarOpen)} />
     </div>
   );
 }
