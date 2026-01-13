@@ -17,6 +17,7 @@ import logging
 import re
 import uuid
 import json
+from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Set
 from datetime import datetime
 from dataclasses import dataclass, asdict
@@ -1120,7 +1121,7 @@ INSTRUCTIONS:
         
         # NEW: Check feasibility of each selected metric BEFORE extraction
         logger.info(f"[CHUNKING:METRIC:FEASIBILITY] Analyzing extractability of {len(selected_metrics)} selected metrics")
-        doc_capability = self._assess_document_capability(structural_chunks, file_id)
+        # doc_capability already computed at line 1080, reusing it (OPTIMIZATION: removed duplicate call)
         feasibility_map = {}
         feasible_metrics = []
         unfeasible_metrics = []
@@ -1147,11 +1148,12 @@ INSTRUCTIONS:
         for metric_name in list(selected_metrics.keys())[:20]:
             logger.debug(f"[CHUNKING:METRIC]   - {metric_name}")
         
-        for struct_chunk in structural_chunks:
-            # Extract ALL metrics from this chunk
-            chunk_text = struct_chunk.text
-            all_metrics = self._extract_all_metric_mentions(chunk_text, struct_chunk)
-            
+        # OPTIMIZED: Extract metrics from ALL chunks in ONE LLM call instead of per-chunk calls
+        logger.info(f"[CHUNKING:METRIC:EXTRACTION:BATCH] OPTIMIZED: Extracting metrics from {len(structural_chunks)} chunks in ONE LLM call")
+        all_metrics_all_chunks = self._extract_metrics_batch(structural_chunks, selected_metrics)
+        
+        # Build metric_chunk_data from batched extraction results
+        for struct_chunk, all_metrics in zip(structural_chunks, all_metrics_all_chunks):
             if all_metrics:
                 logger.debug(f"[CHUNKING:METRIC] Chunk {struct_chunk.chunk_index}: Found {len(all_metrics)} metrics")
                 for m in all_metrics:
@@ -1177,7 +1179,7 @@ INSTRUCTIONS:
                             "source_chunks": [],
                             "texts": [],
                             "score": selected_metrics[selected_metric_name],
-                            "is_from_table": self._is_table_chunk(chunk_text)
+                            "is_from_table": self._is_table_chunk(struct_chunk.text)
                         }
                         extraction_log[selected_metric_name] = {
                             "score": selected_metrics[selected_metric_name],
@@ -1228,35 +1230,44 @@ INSTRUCTIONS:
                 logger.debug(f"[CHUNKING:METRIC]   - {metric_name}")
 
         
-        # Step 4: Create metric-centric chunks for selected metrics
-        logger.info(f"[CHUNKING:METRIC] Step 4: Creating metric-centric chunks for selected metrics (OPTIMIZED OUTPUT)")
-        metric_chunks = []
+        # Step 4: Create metric-centric chunks for selected metrics (OPTIMIZED - BATCHED SYNTHESIS)
+        logger.info(f"[CHUNKING:METRIC] Step 4: Creating metric-centric chunks (batched synthesis)")
         
+        # Pre-compute best values for all metrics
+        metrics_to_synthesize = {}
         for metric_name, metric_data in metric_chunk_data.items():
-            if not metric_data["occurrences"]:
-                logger.debug(f"[CHUNKING:METRIC] Metric '{metric_name}' selected but no data found in chunks, skipping")
-                continue
-            
-            # Extract best values
-            best_values = self._select_metric_values(
-                metric_name,
-                metric_data["occurrences"],
-                metric_data["texts"]
-            )
-            
-            # Synthesize comprehensive text (OPTIMIZED - structured output)
-            if metric_data["is_from_table"]:
-                aggregated_text = self._synthesize_table_metric_text(
+            if metric_data["occurrences"]:
+                best_values = self._select_metric_values(
                     metric_name,
-                    metric_data["texts"][0],
                     metric_data["occurrences"],
-                    best_values
+                    metric_data["texts"]
                 )
-            else:
-                aggregated_text = self._synthesize_metric_text(
+                metrics_to_synthesize[metric_name] = {
+                    "data": metric_data,
+                    "best_values": best_values
+                }
+        
+        # OPTIMIZED: Single LLM call for all metric syntheses instead of per-metric calls
+        batch_synthesis_results = {}
+        if self.llm and metrics_to_synthesize:
+            batch_synthesis_results = self._batch_synthesize_metrics(
+                metrics_to_synthesize,
+                document_context
+            )
+        
+        # Create chunks using synthesized text
+        metric_chunks = []
+        for metric_name, metric_info in metrics_to_synthesize.items():
+            metric_data = metric_info["data"]
+            best_values = metric_info["best_values"]
+            
+            # Use batched synthesis result, fallback to template
+            aggregated_text = batch_synthesis_results.get(metric_name)
+            if not aggregated_text:
+                # Fallback: Template-based synthesis (no LLM)
+                aggregated_text = self._template_metric_synthesis(
                     metric_name,
-                    metric_data["texts"],
-                    metric_data["occurrences"],
+                    metric_data,
                     best_values
                 )
             
@@ -1280,14 +1291,10 @@ INSTRUCTIONS:
             )
             
             metric_chunks.append(metric_chunk)
-            marker = "[CUSTOM]" if is_custom else ""
-            logger.info(f"[CHUNKING:METRIC]   ✓ Created chunk for '{metric_name}' {marker}(score={metric_data['score']:.1f}/10.0)")
+            logger.info(f"[CHUNKING:METRIC]   ✓ Created chunk for '{metric_name}'")
         
-        # Step 4B: SYNTHESIS OF MISSING CUSTOM METRICS
-        # For custom metrics selected by LLM but not extracted, synthesize their data
-        # This is CRITICAL for materiality-focused selection: LLM may select aggregates,
-        # trends, or derived metrics that require synthesis, not direct extraction
-        logger.info(f"[CHUNKING:METRIC] Step 4B: Synthesizing missing custom metrics (materiality-based synthesis)")
+        # Step 4B: SYNTHESIS OF MISSING CUSTOM METRICS (OPTIMIZED - BATCHED)
+        logger.info(f"[CHUNKING:METRIC] Step 4B: Synthesizing missing custom metrics (batched)")
         
         missing_metrics = set(selected_metrics.keys()) - set(m.metric_name for m in metric_chunks)
         custom_missing = [m for m in missing_metrics if m in custom_metric_names]
@@ -1295,32 +1302,27 @@ INSTRUCTIONS:
         if custom_missing:
             logger.info(f"[CHUNKING:METRIC:SYNTHESIS] Found {len(custom_missing)} custom metrics to synthesize")
             
-            for metric_name in custom_missing:
-                try:
-                    score = selected_metrics[metric_name]
-                    
-                    # Use LLM to synthesize data for this custom metric
-                    synthesized_chunk = self._synthesize_custom_metric_data(
-                        metric_name,
-                        document_context,
-                        score
-                    )
-                    
-                    if synthesized_chunk:
-                        # Set file_id from parameter
-                        synthesized_chunk.file_id = file_id
-                        metric_chunks.append(synthesized_chunk)
-                        logger.info(f"[CHUNKING:METRIC:SYNTHESIS]   ✓ Synthesized custom metric: '{metric_name}' (score={score:.1f}/10.0)")
-                    else:
-                        logger.warning(f"[CHUNKING:METRIC:SYNTHESIS]   ✗ Failed to synthesize '{metric_name}'")
-                except Exception as e:
-                    logger.error(f"[CHUNKING:METRIC:SYNTHESIS]   ✗ Error synthesizing '{metric_name}': {e}")
+            # OPTIMIZED: Synthesize all custom metrics in ONE LLM call
+            synthesized_chunks_dict = self._batch_synthesize_custom_metrics(
+                custom_missing,
+                selected_metrics,
+                document_context
+            )
+            
+            # Add all synthesized chunks
+            for metric_name, synthesized_chunk in synthesized_chunks_dict.items():
+                if synthesized_chunk:
+                    synthesized_chunk.file_id = file_id
+                    metric_chunks.append(synthesized_chunk)
+                    logger.info(f"[CHUNKING:METRIC:SYNTHESIS]   ✓ Synthesized: '{metric_name}'")
+                else:
+                    logger.warning(f"[CHUNKING:METRIC:SYNTHESIS]   ✗ Failed: '{metric_name}'")
         else:
             logger.debug(f"[CHUNKING:METRIC:SYNTHESIS] No custom metrics to synthesize")
         
         # Final comprehensive summary with gap analysis
         logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Metric chunk creation completed")
-        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] ═" * 40)
+        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] {'═' * 80}")
         logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Requested: {len(selected_metrics)} metrics selected by LLM")
         logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Extracted: {extracted_count} metrics with data found")
         logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] Partial: {partial_count} metrics with incomplete data")
@@ -1345,7 +1347,7 @@ INSTRUCTIONS:
                 score = selected_metrics[metric_name]
                 logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY]   ✗ {metric_name} (score={score:.1f}): {reason}")
         
-        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] ═" * 40)
+        logger.info(f"[CHUNKING:METRIC:FINAL_SUMMARY] {'═' * 80}")
         
         return metric_chunks
     
@@ -1689,6 +1691,180 @@ Rules for output:
         
         return unique
     
+    def _extract_metrics_batch(self, structural_chunks: List[StructuralChunk], selected_metrics: Dict[str, float]) -> List[List[MetricOccurrence]]:
+        """
+        OPTIMIZED: Extract metrics from ALL chunks in a single LLM call instead of per-chunk calls.
+        Significantly reduces LLM inference time by batching multiple extraction requests.
+        
+        Args:
+            structural_chunks: List of structural chunks to extract metrics from
+            selected_metrics: Dict of selected metric names and scores
+            
+        Returns:
+            List of metric lists (one per structural chunk)
+        """
+        if not self.llm:
+            # Fallback to rule-based extraction for each chunk
+            return [self._extract_metrics_from_text(chunk.text) for chunk in structural_chunks]
+        
+        try:
+            logger.debug(f"[CHUNKING:METRIC:EXTRACTION:BATCH] Batching extraction for {len(structural_chunks)} chunks")
+            
+            # Prepare chunk texts for batch extraction
+            chunk_texts = [chunk.text[:5000] for chunk in structural_chunks]  # Limit to 5k chars per chunk
+            selected_metric_names = list(selected_metrics.keys())
+            
+            # Create batch extraction prompt
+            batch_prompt = f"""You are a financial analysis expert. Extract metrics from {len(structural_chunks)} document excerpts.
+
+Looking for these metrics (or close matches):
+{', '.join(selected_metric_names[:30])}
+
+For each document excerpt, extract ALL relevant financial metrics found, including:
+- Primary metrics explicitly stated
+- Values with units and periods
+- Any metrics matching the names above or similar
+
+For each metric found, provide (pipe-separated):
+metric_name|metric_type|value|period|confidence
+
+Document excerpts to analyze:
+{chr(10).join([f"--- EXCERPT {i+1} ---\n{text}\n" for i, text in enumerate(chunk_texts)])}
+
+For each excerpt, list metrics found (format: metric_name|type|value|period|confidence). Separate excerpts with a blank line.
+
+CRITICAL: 
+- Match metrics to the list above as closely as possible
+- Include period/year with all values
+- Only report metrics actually found in the excerpts
+- Be specific with metric types"""
+            
+            response = self.llm.invoke(batch_prompt)
+            response_text = response.content if hasattr(response, 'content') else str(response)
+            
+            # DEBUG: Log raw response for debugging
+            logger.info(f"[CHUNKING:METRIC:EXTRACTION:BATCH:DEBUG] Raw LLM response ({len(response_text)} chars):\n{response_text[:1500]}")
+            
+            # Parse response - try intelligent parsing with fallback
+            all_chunk_metrics = []
+            
+            # Strategy 1: Look for lines with pipe separators (pipe-separated format)
+            lines_with_pipes = [line for line in response_text.split('\n') 
+                              if '|' in line and not any(x in line.lower() for x in ['metric_name', 'excerpt', '---', '==', 'looking', 'for'])]
+            
+            logger.debug(f"[CHUNKING:METRIC:EXTRACTION:BATCH:DEBUG] Found {len(lines_with_pipes)} lines with pipe separators")
+            
+            if lines_with_pipes:
+                # Use pipe-separated parsing
+                current_chunk_idx = 0
+                current_metrics = []
+                
+                for line in response_text.split('\n'):
+                    stripped = line.strip()
+                    
+                    # Check if this is an excerpt header
+                    if 'EXCERPT' in line.upper():
+                        if current_metrics and current_chunk_idx < len(structural_chunks):
+                            all_chunk_metrics.append(current_metrics)
+                            current_metrics = []
+                        current_chunk_idx += 1
+                        continue
+                    
+                    # Blank lines might separate sections
+                    if not stripped:
+                        continue
+                    
+                    # Skip headers and metadata
+                    if any(x in line.lower() for x in ['metric_name', 'excerpt', '---', '==', 'looking', 'for', 'provide', 'format']):
+                        continue
+                    
+                    # Try to parse as metric line
+                    if '|' in line:
+                        parts = [p.strip() for p in line.split('|')]
+                        if len(parts) >= 4:  # At least: name|type|value|period (confidence optional)
+                            try:
+                                metric_name = parts[0]
+                                metric_type_str = parts[1].lower()
+                                value = parts[2] if parts[2] and parts[2].lower() != 'n/a' else None
+                                period = parts[3] if len(parts) > 3 and parts[3] and parts[3].lower() != 'n/a' else None
+                                confidence = 0.85  # Default confidence
+                                
+                                if len(parts) > 4:
+                                    try:
+                                        confidence = float(parts[4])
+                                    except ValueError:
+                                        confidence = 0.85
+                                
+                                # Skip if metric name is a header/placeholder
+                                if metric_name.lower() in ['metric_name', 'name', 'excerpt', '---']:
+                                    continue
+                                    
+                                # Skip historical markers
+                                if value and value.lower() == 'historical':
+                                    continue
+                                
+                                # Skip if no value and no period
+                                if not value and not period:
+                                    continue
+                                
+                                metric_type = self._get_metric_type(metric_type_str)
+                                
+                                occurrence = MetricOccurrence(
+                                    metric_name=metric_name,
+                                    metric_type=metric_type,
+                                    value=value,
+                                    period=period,
+                                    confidence=confidence
+                                )
+                                current_metrics.append(occurrence)
+                                logger.debug(f"[CHUNKING:METRIC:EXTRACTION:BATCH:DEBUG] Parsed: {metric_name} = {value} ({period})")
+                                
+                            except (ValueError, IndexError) as parse_err:
+                                logger.debug(f"[CHUNKING:METRIC:EXTRACTION:BATCH:DEBUG] Failed to parse line: {line} ({parse_err})")
+                                continue
+                
+                # Add any remaining metrics
+                if current_metrics:
+                    all_chunk_metrics.append(current_metrics)
+            
+            else:
+                logger.warning(f"[CHUNKING:METRIC:EXTRACTION:BATCH] No pipe-separated metrics found in LLM response")
+                logger.info(f"[CHUNKING:METRIC:EXTRACTION:BATCH] Response preview:\n{response_text[:800]}")
+            
+            # Pad with empty lists if we didn't get all chunks
+            while len(all_chunk_metrics) < len(structural_chunks):
+                all_chunk_metrics.append([])
+            
+            # Truncate if we got too many
+            all_chunk_metrics = all_chunk_metrics[:len(structural_chunks)]
+            
+            # DEBUG: Log extraction results per chunk
+            for i, metrics in enumerate(all_chunk_metrics):
+                if metrics:
+                    logger.debug(f"[CHUNKING:METRIC:EXTRACTION:BATCH:DEBUG] Chunk {i+1}: Found {len(metrics)} metrics")
+                    for m in metrics[:3]:
+                        logger.debug(f"  - {m.metric_name}: {m.value} ({m.period})")
+                else:
+                    logger.debug(f"[CHUNKING:METRIC:EXTRACTION:BATCH:DEBUG] Chunk {i+1}: No metrics extracted")
+            
+            total_metrics = sum(len(m) for m in all_chunk_metrics)
+            logger.info(f"[CHUNKING:METRIC:EXTRACTION:BATCH] ✓ Batch extraction complete: {total_metrics} metrics from {len(structural_chunks)} chunks")
+            
+            # FALLBACK: If batch extraction returned 0 metrics, try per-chunk extraction
+            if total_metrics == 0:
+                logger.warning(f"[CHUNKING:METRIC:EXTRACTION:BATCH] Batch extraction returned 0 metrics - using fallback per-chunk extraction")
+                fallback_results = [self._extract_all_metric_mentions(chunk.text, chunk) for chunk in structural_chunks]
+                total_fallback = sum(len(m) for m in fallback_results)
+                logger.info(f"[CHUNKING:METRIC:EXTRACTION:BATCH] ✓ Fallback extraction found {total_fallback} metrics")
+                return fallback_results
+            
+            return all_chunk_metrics
+            
+        except Exception as e:
+            logger.warning(f"[CHUNKING:METRIC:EXTRACTION:BATCH] Batch extraction failed: {e}, falling back to per-chunk extraction")
+            # Fallback: extract per chunk (slower but reliable)
+            return [self._extract_all_metric_mentions(chunk.text, chunk) for chunk in structural_chunks]
+    
     def _synthesize_table_metric_text(self,
                                      metric_name: str,
                                      table_text: str,
@@ -1897,6 +2073,268 @@ Generate ONLY a JSON object with these exact fields (no markdown, no explanation
             synthesis_parts.append(f"CONFIDENCE: {sum(o.confidence for o in occurrences) / len(occurrences):.0%}")
         
         return " | ".join(synthesis_parts)
+    
+    def _batch_synthesize_metrics(self, metrics_to_synthesize: Dict, document_context: str) -> Dict[str, str]:
+        """
+        OPTIMIZED: Synthesize all metrics in ONE LLM call instead of per-metric.
+        
+        Args:
+            metrics_to_synthesize: Dict of {metric_name: {data, best_values}}
+            document_context: Document excerpt for context
+            
+        Returns:
+            Dict mapping metric_name -> synthesized_text
+        """
+        if not self.llm or not metrics_to_synthesize:
+            return {}
+        
+        try:
+            logger.info(f"[CHUNKING:SYNTHESIS:BATCH] Synthesizing {len(metrics_to_synthesize)} metrics in ONE LLM call")
+            
+            # Build batch synthesis prompt
+            metrics_list = []
+            for metric_name, info in metrics_to_synthesize.items():
+                best_values = info["best_values"]
+                value_str = best_values.get('latest_value', 'N/A')
+                period_str = best_values.get('period', 'N/A')
+                metrics_list.append(f"- {metric_name} (value: {value_str}, period: {period_str})")
+            
+            synthesis_prompt = f"""BATCH METRIC TEXT SYNTHESIS
+
+Document Context:
+{document_context[:2000]}
+
+Synthesize brief descriptions for these {len(metrics_to_synthesize)} metrics:
+
+{chr(10).join(metrics_list)}
+
+For each metric, provide a concise one-line summary focusing on:
+1. What the metric measures
+2. Current value/trend
+3. Business significance
+
+RESPOND WITH ONLY JSON (no markdown, no explanations):
+{{
+  "metric_name_1": "one-line description with value and context",
+  "metric_name_2": "one-line description with value and context",
+  ...
+}}"""
+            
+            logger.debug(f"[CHUNKING:SYNTHESIS:BATCH] Sending batch synthesis prompt ({len(synthesis_prompt)} chars)")
+            
+            # SINGLE LLM CALL for all metrics
+            response = self.llm.invoke(synthesis_prompt)
+            response_text = response.content if hasattr(response, 'content') else str(response)
+            
+            # Parse JSON response
+            try:
+                json_match = re.search(r'\{[\s\S]*\}', response_text)
+                if json_match:
+                    json_str = json_match.group(0)
+                    synthesis_dict = json.loads(json_str)
+                    
+                    logger.info(f"[CHUNKING:SYNTHESIS:BATCH] ✓ Successfully synthesized {len(synthesis_dict)} metrics in 1 call")
+                    return synthesis_dict
+            except json.JSONDecodeError as e:
+                logger.warning(f"[CHUNKING:SYNTHESIS:BATCH] JSON parsing failed: {e}")
+            
+            return {}
+        
+        except Exception as e:
+            logger.error(f"[CHUNKING:SYNTHESIS:BATCH] Batch synthesis failed: {e}")
+            return {}
+    
+    def _template_metric_synthesis(self, metric_name: str, metric_data: Dict, best_values: Dict) -> str:
+        """
+        OPTIMIZED: Fast template-based synthesis (NO LLM).
+        
+        Used as fallback when LLM not available or for predefined metrics.
+        Provides deterministic, fast output without LLM overhead.
+        
+        Args:
+            metric_name: Name of metric
+            metric_data: Extracted metric data
+            best_values: Selected values dict
+            
+        Returns:
+            Synthesized metric text (no LLM)
+        """
+        parts = []
+        
+        # Core metric info
+        parts.append(f"METRIC: {metric_name}")
+        
+        # Add value and period
+        if best_values and best_values.get('latest_value'):
+            value_str = best_values['latest_value']
+            period_str = best_values.get('period', '')
+            if period_str:
+                parts.append(f"VALUE: {value_str} ({period_str})")
+            else:
+                parts.append(f"VALUE: {value_str}")
+        
+        # Add trend if multiple values available
+        if best_values and best_values.get('all_values') and len(best_values['all_values']) > 1:
+            parts.append(f"TREND: {' → '.join(best_values['all_values'][:3])}")
+        
+        # Add type and confidence
+        if metric_data["occurrences"]:
+            avg_confidence = sum(o.confidence for o in metric_data["occurrences"]) / len(metric_data["occurrences"])
+            parts.append(f"TYPE: {metric_data['occurrences'][0].metric_type.value}")
+            parts.append(f"CONFIDENCE: {avg_confidence:.0%}")
+            parts.append(f"OCCURRENCES: {len(metric_data['occurrences'])}")
+        
+        # Source indicator
+        if metric_data["is_from_table"]:
+            parts.append("SOURCE: Table")
+        else:
+            parts.append("SOURCE: Text")
+        
+        return " | ".join(parts)
+    
+    def _batch_synthesize_custom_metrics(self, 
+                                        custom_metric_names: List[str],
+                                        selected_metrics: Dict[str, float],
+                                        document_context: str) -> Dict[str, Optional[MetricChunk]]:
+        """
+        OPTIMIZED: Synthesize all custom metrics in ONE LLM call.
+        
+        Args:
+            custom_metric_names: List of custom metric names to synthesize
+            selected_metrics: Dict of all selected metrics with scores
+            document_context: Document excerpt for context (should include actual metric values)
+            
+        Returns:
+            Dict mapping metric_name -> MetricChunk (or None if synthesis failed)
+        """
+        if not self.llm or not custom_metric_names:
+            return {}
+        
+        try:
+            logger.info(f"[CHUNKING:SYNTHESIS:BATCH:CUSTOM] Synthesizing {len(custom_metric_names)} custom metrics in ONE call")
+            
+            # Build batch synthesis prompt with STRICT DATA GROUNDING
+            metrics_list = ", ".join(custom_metric_names)
+            
+            synthesis_prompt = f"""SYNTHESIZE FINANCIAL METRICS - BATCH MODE
+
+CRITICAL INSTRUCTIONS:
+- ONLY use values and data EXPLICITLY found in the document below
+- If you cannot find exact values, state "DATA_NOT_AVAILABLE"
+- Do NOT hallucinate or make up any numbers
+- For calculations: show the math (e.g., Revenue 872M - Cost 395M = Gross Profit 477M)
+- Always include units (M, %, K, etc.) from the source data
+
+Document Data:
+{document_context[:4000]}
+
+Your Task:
+Synthesize these {len(custom_metric_names)} derived/custom metrics based ONLY on actual data above:
+{metrics_list}
+
+For each metric:
+1. Type: "calculation" (if computed), "aggregate" (if summed), "data_not_available" (if missing)
+2. Values: ONLY from document or calculated from document values
+3. Calculation: exact formula used (e.g., "Total Revenue - Cost of Revenue")
+4. Confidence: 0.85+ if using actual data, 0.0 if DATA_NOT_AVAILABLE
+
+RESPOND WITH ONLY JSON (no markdown, no explanations):
+{{
+  "metric_name": {{
+    "type": "calculation|aggregate|data_not_available",
+    "values": ["value_with_unit"],
+    "calculation": "exact formula or 'DATA_NOT_AVAILABLE'",
+    "confidence": 0.85,
+    "summary": "based on: [source data]"
+  }}
+}}
+
+VALIDATION RULE: If you cannot find the required input data in the document, return type:"data_not_available" with confidence:0.0"""
+            
+            logger.debug(f"[CHUNKING:SYNTHESIS:BATCH:CUSTOM] Sending batch synthesis prompt with data grounding")
+            
+            # SINGLE LLM CALL for all custom metrics
+            response = self.llm.invoke(synthesis_prompt)
+            response_text = response.content if hasattr(response, 'content') else str(response)
+            
+            # Parse and create chunks
+            result_chunks = {}
+            try:
+                json_match = re.search(r'\{[\s\S]*\}', response_text)
+                if json_match:
+                    json_str = json_match.group(0)
+                    synthesis_dict = json.loads(json_str)
+                    
+                    logger.info(f"[CHUNKING:SYNTHESIS:BATCH:CUSTOM] ✓ Synthesized {len(synthesis_dict)} metrics")
+                    
+                    # Convert synthesis results to MetricChunk objects
+                    for metric_name, metric_data in synthesis_dict.items():
+                        if metric_name in custom_metric_names and isinstance(metric_data, dict):
+                            try:
+                                # VALIDATION: Skip metrics marked as data_not_available
+                                if metric_data.get('type') == 'data_not_available' or metric_data.get('confidence', 0) == 0:
+                                    logger.debug(f"[CHUNKING:SYNTHESIS:BATCH:CUSTOM] Skipping '{metric_name}' - data not available in document")
+                                    result_chunks[metric_name] = None
+                                    continue
+                                
+                                # Build occurrences from synthesis
+                                occurrences = []
+                                for value in metric_data.get('values', []):
+                                    occurrence = MetricOccurrence(
+                                        metric_name=metric_name,
+                                        metric_type=MetricType.OTHER,
+                                        value=value,
+                                        period="Calculated",
+                                        confidence=float(metric_data.get('confidence', 0.7))
+                                    )
+                                    occurrences.append(occurrence)
+                                
+                                # Create metric chunk
+                                synthesis_text = f"""SYNTHESIZED METRIC: {metric_name}
+
+Type: {metric_data.get('type', 'Unknown')}
+Values: {', '.join(str(v) for v in metric_data.get('values', ['N/A']))}
+Calculation: {metric_data.get('calculation', 'N/A')}
+
+Summary:
+{metric_data.get('summary', 'Metric calculated from document data')}
+
+Confidence: {float(metric_data.get('confidence', 0.7)):.0%}"""
+                                
+                                metric_chunk = MetricChunk(
+                                    metric_name=metric_name,
+                                    metric_type=MetricType.OTHER,
+                                    chunk_id=str(uuid.uuid4()),
+                                    text=synthesis_text,
+                                    occurrences=occurrences if occurrences else [MetricOccurrence(
+                                        metric_name=metric_name,
+                                        metric_type=MetricType.OTHER,
+                                        value=str(metric_data.get('values', ['Calculated'])[0]),
+                                        period="N/A",
+                                        confidence=float(metric_data.get('confidence', 0.7))
+                                    )],
+                                    source_chunk_ids=[],
+                                    is_from_table=False,
+                                    is_custom_metric=True,
+                                    file_id="",  # Will be set by caller
+                                    timestamp=datetime.now().isoformat(),
+                                    sources=[],
+                                    confidence=min(0.9, float(metric_data.get('confidence', 0.7)))
+
+                                )
+                                result_chunks[metric_name] = metric_chunk
+                            except Exception as e:
+                                logger.warning(f"[CHUNKING:SYNTHESIS:BATCH:CUSTOM] Failed to create chunk for {metric_name}: {e}")
+                                result_chunks[metric_name] = None
+            
+            except json.JSONDecodeError as e:
+                logger.warning(f"[CHUNKING:SYNTHESIS:BATCH:CUSTOM] JSON parsing failed: {e}")
+            
+            return result_chunks
+        
+        except Exception as e:
+            logger.error(f"[CHUNKING:SYNTHESIS:BATCH:CUSTOM] Batch synthesis failed: {e}")
+            return {metric_name: None for metric_name in custom_metric_names}
     
     def _synthesize_custom_metric_data(self,
                                        metric_name: str,
@@ -2418,6 +2856,86 @@ Respond with ONLY a single decimal number between 0.0 and 1.0 (e.g., 0.85)"""
                    f"{len([m for m in metric_payloads if m['is_from_table']])} table metric chunks)")
         return structural_payloads, metric_payloads
     
+    def _log_pdf_results_to_file(self, 
+                                 text: str, 
+                                 file_id: str,
+                                 structural_chunks: List['StructuralChunk'],
+                                 metric_chunks: List['MetricChunk'],
+                                 struct_payloads: List[Dict],
+                                 metric_payloads: List[Dict]):
+        """Log PDF extraction results and metric chunk creation to pdf_result_log.txt"""
+        try:
+            log_file = Path(__file__).parent.parent.parent / "pdf_result_log.txt"
+            
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(f"\n{'='*100}\n")
+                f.write(f"PROCESSING RESULT - {datetime.now().isoformat()}\n")
+                f.write(f"{'='*100}\n\n")
+                
+                # PDF Extraction Summary
+                f.write(f"PDF EXTRACTION SUMMARY:\n")
+                f.write(f"  File ID: {file_id}\n")
+                f.write(f"  Text Length: {len(text)} characters\n")
+                f.write(f"  Word Count: {len(text.split())} words\n")
+                f.write(f"  Character Density: {len(text.split()) / max(len(text), 1) * 100:.2f}%\n\n")
+                
+                # Structural Chunks Summary
+                f.write(f"STRUCTURAL CHUNKS CREATED:\n")
+                f.write(f"  Total Chunks: {len(structural_chunks)}\n")
+                if structural_chunks:
+                    f.write(f"  Avg Chunk Size: {sum(len(c.text) for c in structural_chunks) / len(structural_chunks):.0f} chars\n")
+                    f.write(f"  Min/Max Chunk: {min(len(c.text) for c in structural_chunks)} / {max(len(c.text) for c in structural_chunks)} chars\n")
+                    f.write(f"  Sample Chunks:\n")
+                    for i, chunk in enumerate(structural_chunks[:3]):
+                        f.write(f"    [{i+1}] Index {chunk.chunk_index}: {len(chunk.text)} chars, "
+                               f"Metrics: {len(chunk.metrics_found)}\n")
+                        if chunk.metrics_found:
+                            for metric in chunk.metrics_found[:3]:
+                                f.write(f"         - {metric.metric_name}: {metric.value} ({metric.period})\n")
+                f.write(f"\n")
+                
+                # Metric Chunks Summary
+                f.write(f"METRIC-CENTRIC CHUNKS:\n")
+                f.write(f"  Total Metric Chunks: {len(metric_chunks)}\n")
+                f.write(f"  Custom/Synthesized: {sum(1 for m in metric_chunks if m.is_custom_metric)}\n")
+                if metric_chunks:
+                    f.write(f"  Metrics Created:\n")
+                    for i, chunk in enumerate(metric_chunks):
+                        f.write(f"    [{i+1}] {chunk.metric_name}\n")
+                        f.write(f"        Type: {chunk.metric_type.value}\n")
+                        f.write(f"        Source Chunks: {len(chunk.source_chunk_ids)}\n")
+                        f.write(f"        Occurrences: {len(chunk.occurrences)}\n")
+                        f.write(f"        Is Custom: {chunk.is_custom_metric}\n")
+                        f.write(f"        Confidence: {chunk.confidence:.2f}\n")
+                        f.write(f"        Text Preview: {chunk.text[:150]}...\n")
+                else:
+                    f.write(f"  ⚠ NO METRIC CHUNKS CREATED - See diagnostic below\n")
+                f.write(f"\n")
+                
+                # Storage Payloads
+                f.write(f"STORAGE PAYLOADS:\n")
+                f.write(f"  Structural Payloads: {len(struct_payloads)}\n")
+                f.write(f"  Metric Payloads: {len(metric_payloads)}\n\n")
+                
+                # Diagnostic Info
+                f.write(f"DIAGNOSTIC INFORMATION:\n")
+                if len(metric_chunks) == 0:
+                    f.write(f"  ⚠ NO METRIC CHUNKS CREATED\n")
+                    f.write(f"  Possible causes:\n")
+                    f.write(f"    1. LLM failed to return selected metrics (check selected_metrics dict)\n")
+                    f.write(f"    2. aggregate_metric_chunks() returned empty list\n")
+                    f.write(f"    3. validate_metric_chunks() filtered all chunks\n")
+                    f.write(f"    4. Structural chunks have no metrics found\n")
+                    f.write(f"    5. LLM model not responding correctly\n")
+                else:
+                    f.write(f"  ✓ {len(metric_chunks)} metric chunks created successfully\n")
+                    f.write(f"  ✓ {sum(m.is_custom_metric for m in metric_chunks)} custom/synthesized metrics\n")
+                
+                f.write(f"\n{'='*100}\n\n")
+                
+        except Exception as e:
+            logger.error(f"Failed to log PDF results: {e}")
+
     def process_document(self,
                         text: str,
                         file_id: str,
@@ -2450,6 +2968,10 @@ Respond with ONLY a single decimal number between 0.0 and 1.0 (e.g., 0.85)"""
         struct_payloads, metric_payloads = self.prepare_for_storage(
             structural_chunks, metric_chunks, user_id, chat_session_id
         )
+        
+        # NEW: Log PDF results to file for debugging
+        self._log_pdf_results_to_file(text, file_id, structural_chunks, metric_chunks, 
+                                     struct_payloads, metric_payloads)
         
         logger.info(f"[CHUNKING:PROCESS] ✓ Full pipeline complete: "
                    f"{len(struct_payloads)} structural, "

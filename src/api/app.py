@@ -59,6 +59,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Add file handler to capture all logs to logs_debug.txt (use absolute path)
+log_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs_debug.txt')
+file_handler = logging.FileHandler(log_file_path, mode='a', encoding='utf-8')
+file_handler.setLevel(logging.DEBUG)
+file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(file_formatter)
+logging.getLogger().addHandler(file_handler)  # Add to root logger (captures all loggers)
+logger.info(f"Log file configured at: {log_file_path}")
+
 app = FastAPI(
     title="Financial Agent API",
     description="API cho Agent tư vấn đầu tư chứng khoán Việt Nam",

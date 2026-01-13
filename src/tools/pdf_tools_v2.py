@@ -30,6 +30,101 @@ from ..services.table_chunking_service import TableChunkingService
 logger = logging.getLogger(__name__)
 
 
+def _log_pdf_extraction_result(pdf_path: str, file_name: str, total_pages: int, 
+                                table_count: int, text_length: int, processing_method: str,
+                                extracted_text: str = "", tables_markdown: str = ""):
+    """Log PDF extraction results to pdf_result_log.txt"""
+    try:
+        from datetime import datetime
+        log_file = Path(__file__).parent.parent.parent / "pdf_result_log.txt"
+        
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(f"\n{'='*100}\n")
+            f.write(f"PDF EXTRACTION RESULT - {datetime.now().isoformat()}\n")
+            f.write(f"{'='*100}\n\n")
+            f.write(f"PDF DETAILS:\n")
+            f.write(f"  File: {file_name}\n")
+            f.write(f"  Path: {pdf_path}\n")
+            f.write(f"  Total Pages: {total_pages}\n")
+            f.write(f"  Processing Method: {processing_method}\n\n")
+            f.write(f"EXTRACTION STATISTICS:\n")
+            f.write(f"  Text Extracted: {text_length:,} characters\n")
+            f.write(f"  Tables Extracted: {table_count}\n")
+            f.write(f"  Text Density: {(text_length / (total_pages * 1000) if total_pages > 0 else 0):.2f} chars/page\n\n")
+            
+            # Full extracted text
+            f.write(f"RAW EXTRACTED TEXT:\n")
+            f.write(f"{'-'*100}\n")
+            f.write(extracted_text)
+            f.write(f"\n{'-'*100}\n\n")
+            
+            # Tables markdown
+            if tables_markdown:
+                f.write(f"EXTRACTED TABLES (MARKDOWN):\n")
+                f.write(f"{'-'*100}\n")
+                f.write(tables_markdown)
+                f.write(f"\n{'-'*100}\n\n")
+            else:
+                f.write(f"EXTRACTED TABLES: None\n\n")
+            
+            f.write(f"STATUS: ✓ Successfully extracted\n\n")
+    except Exception as e:
+        logger.error(f"Failed to log PDF extraction result: {e}")
+
+
+def _format_tables_for_log(tables: List[Dict]) -> str:
+    """Format extracted tables as markdown for logging"""
+    if not tables:
+        return ""
+    
+    formatted = []
+    for idx, table in enumerate(tables):
+        formatted.append(f"\n### Table {idx + 1} (Page {table.get('page', 'Unknown')})\n")
+        
+        # Create markdown table
+        if table.get('data'):
+            rows = table['data']
+            if rows:
+                # Header
+                if len(rows) > 0:
+                    header = rows[0]
+                    formatted.append("| " + " | ".join(str(cell).strip() for cell in header) + " |")
+                    formatted.append("|" + "|".join(["---"] * len(header)) + "|")
+                    
+                    # Rows
+                    for row in rows[1:]:
+                        formatted.append("| " + " | ".join(str(cell).strip() for cell in row) + " |")
+        
+        formatted.append("")
+    
+    return "\n".join(formatted)
+
+
+def _log_pdf_combined_result(file_name: str, combined_text: str, tables_markdown: str, 
+                             total_pages: int, table_count: int):
+    """Log the complete combined PDF result that will be passed to chunking service"""
+    try:
+        from datetime import datetime
+        log_file = Path(__file__).parent.parent.parent / "pdf_result_log.txt"
+        
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(f"\n{'='*100}\n")
+            f.write(f"COMBINED PDF CONTENT FOR CHUNKING - {datetime.now().isoformat()}\n")
+            f.write(f"{'='*100}\n\n")
+            f.write(f"FILE: {file_name}\n")
+            f.write(f"Total Size: {len(combined_text):,} characters\n")
+            f.write(f"Total Pages: {total_pages}\n")
+            f.write(f"Tables Found: {table_count}\n\n")
+            f.write(f"COMPLETE TEXT THAT WILL BE PROCESSED:\n")
+            f.write(f"{'-'*100}\n")
+            f.write(combined_text)
+            f.write(f"\n{'-'*100}\n\n")
+    except Exception as e:
+        logger.error(f"Failed to log combined PDF result: {e}")
+
+
+
+
 class PDFExtractionResult(BaseModel):
     """Result from PDF extraction"""
     success: bool
@@ -120,6 +215,12 @@ def extract_text_from_pdf(pdf_path: str) -> PDFExtractionResult:
         logger.info(f"[PDF_TOOLS_V2] Extraction SUCCESSFUL")
         logger.info(f"[PDF_TOOLS_V2] Summary: {page_count} pages, {len(tables)} tables, method={processing_method}")
         logger.info("="*80)
+        
+        # Log to pdf_result_log.txt with full extracted content
+        _log_pdf_extraction_result(pdf_path, file_name, page_count, len(tables), 
+                                   len(extracted_text), processing_method,
+                                   extracted_text=extracted_text, 
+                                   tables_markdown=_format_tables_for_log(tables))
         
         return PDFExtractionResult(
             success=True,
@@ -623,6 +724,9 @@ def analyze_pdf(
         logger.info(f"[PDF_TOOLS_V2] Combined content: {len(combined_text)} chars total")
         logger.debug(f"[PDF_TOOLS_V2] RAW RESULT:\n{combined_text[:1000]}...")  # First 1000 chars for debugging
         
+        # Log complete combined text that will be passed to next stage
+        _log_pdf_combined_result(extraction_result.file_name, combined_text, tables_markdown, 
+                                extraction_result.total_pages, len(extraction_result.tables))
         
         logger.info("="*80)
         logger.info("[PDF_TOOLS_V2] PDF analysis SUCCESSFUL")
