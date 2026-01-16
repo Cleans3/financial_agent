@@ -310,6 +310,7 @@ class AdvancedRetrievalService:
                  include_structural: bool = True) -> List[Dict]:
         """
         Advanced retrieval with metric-centric and structural chunks
+        WITH FALLBACK TO GLOBAL COLLECTION
         
         Args:
             user_id: User ID
@@ -388,6 +389,31 @@ class AdvancedRetrievalService:
         
         # Return top limit results
         final_results = all_results[:limit]
+        
+        # CRITICAL: FALLBACK TO GLOBAL COLLECTION if no results
+        if not final_results or len(final_results) == 0:
+            logger.warning(f"[RETRIEVAL:FALLBACK] No results from user collection, attempting fallback to global retrieval")
+            try:
+                # Try to retrieve from global/shared collection without user_id filter
+                global_metric_results = self._retrieve_metric_chunks_global(query_embedding, limit)
+                global_structural_results = self._retrieve_structural_chunks_global(query_embedding, limit)
+                
+                global_results = []
+                if global_metric_results:
+                    global_results.extend(global_metric_results)
+                    logger.info(f"[RETRIEVAL:FALLBACK] Retrieved {len(global_metric_results)} metric chunks from global collection")
+                if global_structural_results:
+                    global_results.extend(global_structural_results)
+                    logger.info(f"[RETRIEVAL:FALLBACK] Retrieved {len(global_structural_results)} structural chunks from global collection")
+                
+                if global_results:
+                    final_results = global_results[:limit]
+                    logger.info(f"[RETRIEVAL:FALLBACK] ✓ Fallback successful: {len(final_results)} results from global collection")
+                else:
+                    logger.warning(f"[RETRIEVAL:FALLBACK] Global collection also returned no results")
+            except Exception as e:
+                logger.warning(f"[RETRIEVAL:FALLBACK] Fallback attempt failed: {e}")
+        
         logger.info(f"[RETRIEVAL] ✓ Final results: {len(final_results)} chunks")
         
         return final_results
@@ -606,3 +632,59 @@ class AdvancedRetrievalService:
                    f"structural={len(structural_chunks)}")
         
         return formatted_text, metadata
+    
+    def _retrieve_metric_chunks_global(self, query_embedding: List[float], limit: int) -> List[Dict]:
+        """
+        Retrieve metric-centric chunks from global collection (fallback when user collection empty)
+        
+        Args:
+            query_embedding: Query embedding vector
+            limit: Number of results to return
+            
+        Returns:
+            List of metric chunks from global collection
+        """
+        try:
+            logger.info(f"[RETRIEVAL:GLOBAL:METRIC] Searching global collection for metric chunks")
+            # Search without user_id filter to get global results
+            global_results = self.qd_manager.search_global(
+                query_embedding=query_embedding,
+                limit=limit * 2,  # Get more to filter for metric chunks
+                user_id=None  # Global search
+            )
+            
+            # Post-filter: Keep only metric_centric chunks
+            metric_results = [r for r in global_results if r.get('chunk_type') == 'metric_centric'][:limit]
+            logger.info(f"[RETRIEVAL:GLOBAL:METRIC] Found {len(metric_results)} metric chunks from global collection")
+            return metric_results
+        except Exception as e:
+            logger.warning(f"[RETRIEVAL:GLOBAL:METRIC] Failed to retrieve global metric chunks: {e}")
+            return []
+    
+    def _retrieve_structural_chunks_global(self, query_embedding: List[float], limit: int) -> List[Dict]:
+        """
+        Retrieve structural chunks from global collection (fallback when user collection empty)
+        
+        Args:
+            query_embedding: Query embedding vector
+            limit: Number of results to return
+            
+        Returns:
+            List of structural chunks from global collection
+        """
+        try:
+            logger.info(f"[RETRIEVAL:GLOBAL:STRUCTURAL] Searching global collection for structural chunks")
+            # Search without user_id filter to get global results
+            global_results = self.qd_manager.search_global(
+                query_embedding=query_embedding,
+                limit=limit * 2,  # Get more to filter for structural chunks
+                user_id=None  # Global search
+            )
+            
+            # Post-filter: Keep only structural chunks
+            structural_results = [r for r in global_results if r.get('chunk_type') != 'metric_centric'][:limit]
+            logger.info(f"[RETRIEVAL:GLOBAL:STRUCTURAL] Found {len(structural_results)} structural chunks from global collection")
+            return structural_results
+        except Exception as e:
+            logger.warning(f"[RETRIEVAL:GLOBAL:STRUCTURAL] Failed to retrieve global structural chunks: {e}")
+            return []
